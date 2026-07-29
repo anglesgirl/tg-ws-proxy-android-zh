@@ -1,0 +1,8 @@
+
+# Local Android/CI signing configuration
+local.properties
+*.keystore
+*.jks
+.gradle/
+build/
+app/build/

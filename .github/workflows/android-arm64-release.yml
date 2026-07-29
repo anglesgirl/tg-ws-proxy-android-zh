@@ -1,0 +1,90 @@
+name: Build Android arm64 APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_NDK_VERSION: 26.3.11579264
+      ANDROID_API_LEVEL: "35"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform and NDK
+        run: |
+          sdkmanager "platforms;android-${ANDROID_API_LEVEL}" "build-tools;35.0.0" "ndk;${ANDROID_NDK_VERSION}"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Restore release signing key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$ANDROID_KEYSTORE_BASE64"
+          test -n "$ANDROID_KEYSTORE_PASSWORD"
+          test -n "$ANDROID_KEY_ALIAS"
+          test -n "$ANDROID_KEY_PASSWORD"
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.keystore"
+          printf '%s\n' \
+            "sdk.dir=$ANDROID_HOME" \
+            "KEYSTORE_FILE=$RUNNER_TEMP/release.keystore" \
+            "KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD" \
+            "KEY_ALIAS=$ANDROID_KEY_ALIAS" \
+            "KEY_PASSWORD=$ANDROID_KEY_PASSWORD" > local.properties
+
+      - name: Build Rust arm64 native library
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.ANDROID_NDK_VERSION }}
+        run: |
+          cargo ndk -t arm64-v8a --platform 24 -o app/src/main/jniLibs build --release
+          test -f app/src/main/jniLibs/arm64-v8a/libtgwsproxy.so
+
+      - name: Build signed arm64 release APK
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Verify APK contents and signature
+        run: |
+          APK=app/build/outputs/apk/release/app-release.apk
+          test -f "$APK"
+          "$(find "$ANDROID_HOME/build-tools" -mindepth 2 -maxdepth 2 -name apksigner -type f | sort -V | tail -n 1)" verify --verbose --print-certs "$APK"
+          unzip -l "$APK" | grep -F 'lib/arm64-v8a/libtgwsproxy.so'
+          ! unzip -l "$APK" | grep -F 'lib/armeabi-v7a/'
+
+      - name: Package artifact
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/release/app-release.apk dist/TGWSProxy-arm64-v${{ github.run_number }}.apk
+          (cd dist && sha256sum *.apk > SHA256SUMS.txt && zip -9 TGWSProxy-arm64-v${{ github.run_number }}.zip TGWSProxy-arm64-v${{ github.run_number }}.apk SHA256SUMS.txt)
+
+      - name: Upload APK ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: TGWSProxy-arm64-v${{ github.run_number }}
+          path: dist/TGWSProxy-arm64-v${{ github.run_number }}.zip
+          if-no-files-found: error

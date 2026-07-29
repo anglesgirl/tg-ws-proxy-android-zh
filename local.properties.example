@@ -1,0 +1,2 @@
+# Local Android SDK path. Do not commit local.properties or signing credentials.
+sdk.dir=/absolute/path/to/Android/Sdk

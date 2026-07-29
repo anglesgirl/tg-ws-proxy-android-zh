@@ -12,8 +12,13 @@ android {
     defaultConfig {
         applicationId = "com.amurcanov.tgwsproxy"
         targetSdk = 35
-        versionCode = 123
-        versionName = "1.2.3"
+        minSdk = 24
+        ndk {
+            abiFilters.clear()
+            abiFilters.add("arm64-v8a")
+        }
+        versionCode = 124
+        versionName = "1.2.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -21,33 +26,6 @@ android {
         }
     }
 
-    flavorDimensions.add("arch")
-    productFlavors {
-        create("arm32") {
-            dimension = "arch"
-            minSdk = 21
-            ndk {
-                abiFilters.clear()
-                abiFilters.add("armeabi-v7a")
-            }
-        }
-        create("arm64") {
-            dimension = "arch"
-            minSdk = 24
-            ndk {
-                abiFilters.clear()
-                abiFilters.add("arm64-v8a")
-            }
-        }
-        create("universal") {
-            dimension = "arch"
-            minSdk = 21
-            ndk {
-                abiFilters.clear()
-                abiFilters.addAll(listOf("arm64-v8a", "armeabi-v7a"))
-            }
-        }
-    }
 
     val localProperties = Properties()
     val localPropertiesFile = rootProject.file("local.properties")
@@ -98,10 +76,8 @@ android {
             
             if (resolvedFile != null && resolvedFile.exists()) {
                 signingConfig = signingConfigs.getByName("release")
-                println("✅ Signing config applied: ${resolvedFile.absolutePath}")
-            } else {
-                println("⚠️ WARNING: Keystore not found, using debug signing")
-                println("   Looked for: ${resolvedFile?.absolutePath ?: keyFile}")
+            } else if (System.getenv("CI") == "true") {
+                throw GradleException("Release signing keystore is required in CI")
             }
         }
     }

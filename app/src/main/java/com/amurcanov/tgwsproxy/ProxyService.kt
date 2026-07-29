@@ -18,6 +18,9 @@ import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.ServerSocket
 
 class ProxyService : Service() {
 

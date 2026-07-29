@@ -206,7 +206,7 @@ pub unsafe extern "C" fn SetCfProxyConfig(
     c_user_domain: *const c_char,
 ) {
     CFPROXY_ENABLED.store(enabled != 0, Ordering::Relaxed);
-    let user_domain = cstr_to_string(c_user_domain);
+    let user_domain = cfproxy::normalize_user_cf_domain(&cstr_to_string(c_user_domain));
     let mut cfg = CFPROXY.write();
     cfg.user_domain = user_domain.clone();
     if !user_domain.is_empty() {

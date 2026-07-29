@@ -409,6 +409,46 @@ fun SettingsTab(settingsStore: SettingsStore) {
                 )
             }
 
+            if (cfEnabled) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        stringResource(com.amurcanov.tgwsproxy.R.string.custom_cf_domain),
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Switch(
+                        checked = customCfDomainEnabled,
+                        onCheckedChange = {
+                            customCfDomainEnabled = it
+                            scheduleSave()
+                        },
+                        enabled = !isRunning
+                    )
+                }
+                if (customCfDomainEnabled) {
+                    OutlinedTextField(
+                        value = customCfDomain,
+                        onValueChange = {
+                            customCfDomain = it.trim().lowercase()
+                            scheduleSave()
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        enabled = !isRunning,
+                        label = { Text(stringResource(com.amurcanov.tgwsproxy.R.string.custom_cf_domain)) },
+                        placeholder = { Text(stringResource(com.amurcanov.tgwsproxy.R.string.custom_cf_domain_hint)) },
+                        supportingText = {
+                            Text(stringResource(com.amurcanov.tgwsproxy.R.string.custom_cf_domain_description))
+                        },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
+                    )
+                }
+            }
+
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
 
             Row(

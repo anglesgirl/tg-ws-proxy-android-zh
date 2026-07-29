@@ -42,7 +42,10 @@ pub fn decode_cf_domain(s: &str) -> String {
     out
 }
 
-pub fn normalize_cf_domain(s: &str) -> String {
+/// Decode and normalize a domain from the upstream's obfuscated built-in list.
+/// This deliberately retains the upstream `.co.uk` restriction: it is never
+/// used for a domain explicitly supplied by the person using this app.
+pub fn normalize_builtin_cf_domain(s: &str) -> String {
     let mut decoded = decode_cf_domain(s.trim()).trim().to_lowercase();
     while decoded.ends_with('.') {
         decoded.pop();
@@ -53,10 +56,35 @@ pub fn normalize_cf_domain(s: &str) -> String {
     decoded
 }
 
+/// Normalize a self-hosted Cloudflare base domain.
+///
+/// A custom domain must be a DNS hostname, but it is not limited to any TLD.
+/// The proxy will connect to `kws<dc>.<domain>` with that hostname as SNI.
+pub fn normalize_user_cf_domain(s: &str) -> String {
+    let mut domain = s.trim().trim_end_matches('.').to_ascii_lowercase();
+    if domain.is_empty() || domain.len() > 253 || !domain.contains('.') {
+        return String::new();
+    }
+    if domain.parse::<std::net::IpAddr>().is_ok() {
+        return String::new();
+    }
+    let labels: Vec<&str> = domain.split('.').collect();
+    if labels.iter().any(|label| {
+        label.is_empty()
+            || label.len() > 63
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+    }) {
+        return String::new();
+    }
+    domain
+}
+
 pub fn default_cfproxy_domains() -> Vec<String> {
     let mut domains = Vec::with_capacity(CFPROXY_ENC.len());
     for enc in CFPROXY_ENC {
-        let d = normalize_cf_domain(enc);
+        let d = normalize_builtin_cf_domain(enc);
         if !d.is_empty() {
             domains.push(d);
         }
@@ -69,7 +97,7 @@ pub fn merge_cfproxy_domains(lists: &[Vec<String>]) -> Vec<String> {
     let mut merged = Vec::new();
     for list in lists {
         for raw in list {
-            let d = normalize_cf_domain(raw);
+            let d = normalize_builtin_cf_domain(raw);
             if d.is_empty() || seen.contains(&d) {
                 continue;
             }
@@ -89,7 +117,7 @@ pub fn clear_cfproxy_429_cooldowns() {
 }
 
 pub fn clear_cfproxy_429_cooldown(domain: &str) {
-    let d = normalize_cf_domain(domain);
+    let d = normalize_builtin_cf_domain(domain);
     if d.is_empty() {
         return;
     }
@@ -143,7 +171,7 @@ pub fn next_cfproxy_429_cooldown_delay(prev: &Cfproxy429State, retry_after: Dura
 }
 
 pub fn mark_cfproxy_429_cooldown(domain: &str, err: &WsError) {
-    let d = normalize_cf_domain(domain);
+    let d = normalize_builtin_cf_domain(domain);
     if d.is_empty() {
         return;
     }
@@ -171,7 +199,7 @@ pub fn mark_cfproxy_429_cooldown(domain: &str, err: &WsError) {
 }
 
 pub fn cfproxy_429_cooldown_remaining(domain: &str) -> Duration {
-    let d = normalize_cf_domain(domain);
+    let d = normalize_builtin_cf_domain(domain);
     if d.is_empty() {
         return Duration::ZERO;
     }
@@ -353,7 +381,7 @@ pub async fn try_refresh_cfproxy_domains() -> bool {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let d = normalize_cf_domain(line);
+        let d = normalize_builtin_cf_domain(line);
         if !d.is_empty() {
             new_domains.push(d);
         }

@@ -20,6 +20,9 @@
     <string name="connection">Connection</string>
     <string name="port">Port</string>
     <string name="auto_cf_enabled">Auto (CF enabled)</string>
+    <string name="custom_cf_domain">Custom Cloudflare domain</string>
+    <string name="custom_cf_domain_hint">Example: example.com</string>
+    <string name="custom_cf_domain_description">Uses kws&lt;DC&gt;.&lt;your domain&gt;; built-in and remote domain lists are not used.</string>
     <string name="configure_dc_addresses">Configure DC addresses</string>
     <string name="ws_pool">WS pool</string>
     <string name="secret_key">Secret key</string>

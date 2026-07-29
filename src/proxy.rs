@@ -589,7 +589,11 @@ pub async fn tcp_fallback(
 // ---------------------------------------------------------------------------
 
 async fn try_cfproxy_base_domain(dc: i32, base_domain: &str) -> (Option<RawWebSocket>, String) {
-    let base_domain = normalize_cf_domain(base_domain);
+    let base_domain = if CFPROXY.read().user_domain == base_domain {
+        normalize_user_cf_domain(base_domain)
+    } else {
+        normalize_builtin_cf_domain(base_domain)
+    };
     if base_domain.is_empty() {
         return (None, String::new());
     }

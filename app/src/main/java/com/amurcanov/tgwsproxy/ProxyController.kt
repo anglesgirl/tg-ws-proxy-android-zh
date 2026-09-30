@@ -31,6 +31,7 @@ object ProxyController {
         val cfEnabled = settingsStore.cfproxyEnabled.first()
         val customCfDomainEnabled = settingsStore.customCfDomainEnabled.first()
         val customCfDomain = settingsStore.customCfDomain.first().trim()
+        val fixedIpRange = settingsStore.fixedIpRange.first().trim()
         val secretKey = ensureSecretKey(settingsStore)
 
         val parsedIps = buildList {
@@ -67,6 +68,7 @@ object ProxyController {
                     ProxyService.EXTRA_CFPROXY_DOMAIN,
                     if (customCfDomainEnabled && cfEnabled) customCfDomain else ""
                 )
+                putExtra(ProxyService.EXTRA_FIXED_IP_RANGE, fixedIpRange)
                 putExtra(ProxyService.EXTRA_SECRET_KEY, secretKey)
             }
         )

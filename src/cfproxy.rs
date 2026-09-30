@@ -1,4 +1,5 @@
 use crate::config::*;
+use base64::Engine as _;
 use crate::ws::{is_http_status_error, ws_connect_once, RawWebSocket, WsError};
 use crate::{ldebug, lerror, linfo, lwarn};
 use serde::Deserialize;
@@ -424,6 +425,94 @@ struct DohResponse {
 static DOH_CACHE: Lazy<parking_lot::RwLock<std::collections::HashMap<String, (String, Instant)>>> =
     Lazy::new(|| parking_lot::RwLock::new(std::collections::HashMap::new()));
 
+// Внутренние (CN) DoH доступны по «голым» IP: резолвить их домены не нужно,
+// поэтому они работают и при ужатом/подменённом DNS.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DohKind {
+    // Ali: /dns-query принимает только проводной формат (dns=), а /resolve — JSON.
+    Json,
+    // RFC 8484 GET ?dns=<base64url> (Tencent, Volcengine, Ali /dns-query).
+    Wire,
+}
+
+/// Собирает DNS-запрос A/IN и кодирует его в base64url (без padding).
+fn build_dns_query_b64(domain: &str) -> Option<String> {
+    let mut q: Vec<u8> = Vec::with_capacity(64);
+    q.extend_from_slice(&[0x12, 0x34]);
+    q.extend_from_slice(&[0x01, 0x00]);
+    q.extend_from_slice(&[0x00, 0x01]);
+    q.extend_from_slice(&[0x00, 0x00]);
+    q.extend_from_slice(&[0x00, 0x00]);
+    q.extend_from_slice(&[0x00, 0x00]);
+    for label in domain.trim_end_matches('.').split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return None;
+        }
+        q.push(label.len() as u8);
+        q.extend_from_slice(label.as_bytes());
+    }
+    q.push(0);
+    q.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]);
+    Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&q))
+}
+
+/// Достаёт IPv4-адреса из проводного DNS-ответа.
+fn parse_a_records(buf: &[u8]) -> Vec<String> {
+    fn skip_name(buf: &[u8], mut pos: usize) -> usize {
+        loop {
+            if pos >= buf.len() {
+                return pos;
+            }
+            let len = buf[pos] as usize;
+            if len == 0 {
+                return pos + 1;
+            }
+            if len & 0xC0 == 0xC0 {
+                return pos + 2;
+            }
+            pos += 1 + len;
+        }
+    }
+
+    if buf.len() < 12 {
+        return Vec::new();
+    }
+    let qd = u16::from_be_bytes([buf[4], buf[5]]) as usize;
+    let an = u16::from_be_bytes([buf[6], buf[7]]) as usize;
+    let mut pos = 12usize;
+
+    for _ in 0..qd {
+        pos = skip_name(buf, pos);
+        if pos + 4 > buf.len() {
+            return Vec::new();
+        }
+        pos += 4;
+    }
+
+    let mut out = Vec::new();
+    for _ in 0..an {
+        pos = skip_name(buf, pos);
+        if pos + 10 > buf.len() {
+            break;
+        }
+        let rtype = u16::from_be_bytes([buf[pos], buf[pos + 1]]);
+        let rdlen = u16::from_be_bytes([buf[pos + 8], buf[pos + 9]]) as usize;
+        pos += 10;
+        if pos + rdlen > buf.len() {
+            break;
+        }
+        if rtype == 1 && rdlen == 4 {
+            out.push(format!(
+                "{}.{}.{}.{}",
+                buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]
+            ));
+        }
+        pos += rdlen;
+    }
+    out
+}
+
+#[allow(dead_code)]
 fn pick_preferred_ip(candidates: &[String]) -> String {
     let mut fallback_v6 = String::new();
     for c in candidates {
@@ -449,11 +538,15 @@ pub async fn resolve_doh(domain: &str) -> Option<String> {
         }
     }
 
-    let endpoints = [
-        "https://cloudflare-dns.com/dns-query",
-        "https://dns.google/dns-query",
-        "https://dns.quad9.net/dns-query",
-        "https://dns.adguard-dns.com/dns-query",
+    // Голые IP, без резолва доменов: 阿里云 (223.5.5.5/223.6.6.6),
+    // 腾讯云 dnspod (1.12.12.12/120.53.53.53), 火山引擎 (180.184.1.1/180.184.2.2).
+    let endpoints: [(&str, DohKind); 6] = [
+        ("https://223.5.5.5/resolve", DohKind::Json),
+        ("https://1.12.12.12/dns-query", DohKind::Json),
+        ("https://180.184.1.1/dns-query", DohKind::Wire),
+        ("https://223.6.6.6/resolve", DohKind::Json),
+        ("https://120.53.53.53/dns-query", DohKind::Json),
+        ("https://180.184.2.2/dns-query", DohKind::Wire),
     ];
 
     let client = reqwest::Client::builder()
@@ -461,27 +554,47 @@ pub async fn resolve_doh(domain: &str) -> Option<String> {
         .build()
         .ok()?;
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel(endpoints.len() + 1);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(endpoints.len());
     let mut tasks = Vec::new();
 
-    for u in endpoints {
+    for (u, kind) in endpoints {
         let client = client.clone();
         let domain = domain.to_string();
         let tx = tx.clone();
         tasks.push(tokio::spawn(async move {
-            let full = format!("{}?name={}&type=A", u, domain);
-            if let Ok(resp) = client
-                .get(&full)
-                .header("Accept", "application/dns-json")
-                .send()
-                .await
-            {
+            let req = match kind {
+                DohKind::Json => client
+                    .get(format!("{}?name={}&type=A", u, domain))
+                    .header("Accept", "application/dns-json"),
+                DohKind::Wire => match build_dns_query_b64(&domain) {
+                    Some(b64) => client
+                        .get(format!("{}?dns={}", u, b64))
+                        .header("Accept", "application/dns-message"),
+                    None => {
+                        let _ = tx.send(None).await;
+                        return;
+                    }
+                },
+            };
+            if let Ok(resp) = req.send().await {
                 if resp.status().as_u16() == 200 {
-                    if let Ok(r) = resp.json::<DohResponse>().await {
-                        for ans in r.answer {
-                            if ans.type_ == 1 {
-                                let _ = tx.send(Some(ans.data)).await;
-                                return;
+                    match kind {
+                        DohKind::Json => {
+                            if let Ok(r) = resp.json::<DohResponse>().await {
+                                for ans in r.answer {
+                                    if ans.type_ == 1 {
+                                        let _ = tx.send(Some(ans.data)).await;
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        DohKind::Wire => {
+                            if let Ok(body) = resp.bytes().await {
+                                if let Some(ip) = parse_a_records(&body).first() {
+                                    let _ = tx.send(Some(ip.clone())).await;
+                                    return;
+                                }
                             }
                         }
                     }
@@ -491,28 +604,8 @@ pub async fn resolve_doh(domain: &str) -> Option<String> {
         }));
     }
 
-    // UDP-резолв через системный resolver как дополнительный кандидат
-    {
-        let domain2 = domain.to_string();
-        let tx = tx.clone();
-        tasks.push(tokio::spawn(async move {
-            let host = format!("{}:443", domain2);
-            if let Ok(Ok(addrs)) = tokio::time::timeout(
-                Duration::from_millis(1500),
-                tokio::net::lookup_host(host),
-            )
-            .await
-            {
-                let ips: Vec<String> = addrs.map(|a| a.ip().to_string()).collect();
-                let p = pick_preferred_ip(&ips);
-                if !p.is_empty() {
-                    let _ = tx.send(Some(p)).await;
-                    return;
-                }
-            }
-            let _ = tx.send(None).await;
-        }));
-    }
+    // Системный (UDP) resolver убран намеренно: в CN он отдаёт подменённые
+    // адреса и успевал выиграть гонку у DoH, ломая соединение.
 
     drop(tx); // Чтобы rx.recv() завершился, когда все таски завершатся
 
@@ -588,6 +681,38 @@ pub async fn cf_connect_domain(
             if is_http_status_error(&host_err, 429) {
                 return (None, String::new(), Some(host_err));
             }
+
+            // Фиксированный диапазон IP: DoH не спрашиваем вообще, перебираем
+            // адреса прямо из заданного пользователем диапазона.
+            if fixed_ip_range_active() {
+                let ip_timeout = new_timed_attempt_timeout(phase_timeout, phase_timeout);
+                let candidates = fixed_range_next_ips(FIXED_IP_TRIES_PER_CONNECT);
+                let mut last_err = host_err;
+                let mut tried: Vec<String> = Vec::new();
+                for ip in candidates {
+                    tried.push(ip.clone());
+                    match ws_connect_once(&ip, domain, path, ip_timeout).await {
+                        Ok(ws) => {
+                            set_fixed_ip_last_good(&ip);
+                            ldebug!(" CF fixed {} ok via {}", domain, ip);
+                            return (Some(ws), ip, None);
+                        }
+                        Err(e) => {
+                            if is_http_status_error(&e, 429) {
+                                return (None, String::new(), Some(e));
+                            }
+                            last_err = e;
+                        }
+                    }
+                }
+                ldebug!(
+                    " CF fixed {} -> нет ответа, диапазон: {}",
+                    domain,
+                    tried.join(",")
+                );
+                return (None, tried.pop().unwrap_or_default(), Some(last_err));
+            }
+
             let resolved_ip = resolve_doh(domain).await.unwrap_or_default();
             if resolved_ip.is_empty() {
                 ldebug!(" CF DNS {} -> no result", domain);

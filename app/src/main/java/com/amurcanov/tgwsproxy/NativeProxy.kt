@@ -14,6 +14,7 @@ interface ProxyLibrary : Library {
     fun SetPoolSize(size: Int)
     fun SetCfProxyCacheDir(cacheDir: String)
     fun SetCfProxyConfig(enabled: Int, priority: Int, userDomain: String)
+    fun SetFixedIpRange(range: String)
     fun GetSecretWithPrefix(): Pointer?
     fun GetStats(): Pointer?
     fun FreeString(p: Pointer)
@@ -42,6 +43,14 @@ object NativeProxy {
             if (priority) 1 else 0,
             userDomain
         )
+    }
+
+    /**
+     * Фиксированный диапазон IP для CF-доменов, например "104.16.0.1-104.20.255.255".
+     * Пустая строка — диапазон выключен, используется DoH.
+     */
+    fun setFixedIpRange(range: String) {
+        ProxyLibrary.INSTANCE.SetFixedIpRange(range)
     }
 
     /** Returns the full secret with correct prefix (dd or ee+domain_hex) */

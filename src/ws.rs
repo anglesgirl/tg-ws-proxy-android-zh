@@ -693,6 +693,21 @@ pub async fn ws_connect(
         Ok(ws) => return Ok(ws),
         Err(e) => {
             if primary_addr == domain && primary_addr.parse::<IpAddr>().is_err() {
+                // Фиксированный диапазон IP: DoH не используется вообще.
+                if crate::config::fixed_ip_range_active() {
+                    let candidates = crate::config::fixed_range_next_ips(
+                        crate::config::FIXED_IP_TRIES_PER_CONNECT,
+                    );
+                    for ip in candidates {
+                        if let Ok(ws) =
+                            ws_connect_once(&ip, domain, path, attempt_timeout).await
+                        {
+                            crate::config::set_fixed_ip_last_good(&ip);
+                            return Ok(ws);
+                        }
+                    }
+                    return Err(e);
+                }
                 if let Some(resolved) = crate::cfproxy::resolve_doh(domain).await {
                     if !resolved.is_empty() && resolved != primary_addr {
                         return ws_connect_once(&resolved, domain, path, attempt_timeout).await;

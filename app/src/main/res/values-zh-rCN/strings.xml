@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="fixed_ip_range">固定 IP 范围</string>
+    <string name="fixed_ip_range_hint">104.16.0.1-104.20.255.255</string>
+    <string name="fixed_ip_range_description">留空 = 用国内 DoH 解析（阿里 / 腾讯 / 火山，纯 IP）。填写后完全不查 DoH：只按顺序循环尝试这个范围内的 IP。多个范围用逗号分隔。</string>
+</resources>

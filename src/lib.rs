@@ -229,6 +229,37 @@ pub unsafe extern "C" fn SetSecret(c_secret: *const c_char) {
     *PROXY_SECRET.write() = s;
 }
 
+/// # Safety
+/// `c_range` — валидная C-строка или null. Формат: "a.b.c.d-e.f.g.h",
+/// несколько диапазонов через запятую/точку с запятой/пробел.
+/// Пустая строка = фиксированный диапазон выключен (используется DoH).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn SetFixedIpRange(c_range: *const c_char) {
+    let raw = cstr_to_string(c_range);
+    let ranges = parse_fixed_ip_ranges(&raw);
+    let total: u64 = ranges
+        .iter()
+        .map(|(s, e)| (*e as u64 - *s as u64) + 1)
+        .sum();
+    if raw.trim().is_empty() {
+        linfo!("SetFixedIpRange: пусто — фиксированный диапазон выключен (DoH)");
+    } else if ranges.is_empty() {
+        lerror!(
+            "SetFixedIpRange: не удалось разобрать '{}' (ожидается a.b.c.d-e.f.g.h)",
+            raw.trim()
+        );
+    } else {
+        linfo!(
+            "SetFixedIpRange: {} интервал(ов), {} адрес(ов) всего",
+            ranges.len(),
+            total
+        );
+    }
+    FIXED_IP_CURSOR.store(0, Ordering::Relaxed);
+    *FIXED_IP_LAST_GOOD.write() = String::new();
+    *FIXED_IP_RANGES.write() = ranges;
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn GetStats() -> *mut c_char {
     let s = STATS.summary();

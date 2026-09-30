@@ -112,6 +112,106 @@ pub static DC_DEFAULT_IPS: Lazy<HashMap<i32, &'static str>> = Lazy::new(|| {
     m
 });
 
+
+// ---------------------------------------------------------------------------
+// Fixed IP range (вместо DoH-результата для CF-доменов)
+// ---------------------------------------------------------------------------
+// Пользователь задаёт диапазон вида "104.16.0.1-104.20.255.255"; допускается
+// несколько диапазонов через запятую/точку с запятой/пробел/перевод строки.
+// Если диапазон задан — DoH НЕ используется вообще: IP берутся прямо из
+// диапазона и перебираются по кругу (курсор сдвигается на каждую попытку,
+// поэтому большие диапазоны тоже постепенно проходятся).
+pub static FIXED_IP_RANGES: Lazy<RwLock<Vec<(u32, u32)>>> =
+    Lazy::new(|| RwLock::new(Vec::new()));
+pub static FIXED_IP_CURSOR: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+// Последний успешно подключившийся IP — пробуем его первым.
+pub static FIXED_IP_LAST_GOOD: Lazy<RwLock<String>> =
+    Lazy::new(|| RwLock::new(String::new()));
+
+// Сколько IP из диапазона пробуем за одну попытку соединения.
+pub const FIXED_IP_TRIES_PER_CONNECT: usize = 4;
+
+/// Разбирает "a.b.c.d-e.f.g.h" (одну или несколько записей) в список интервалов.
+pub fn parse_fixed_ip_ranges(raw: &str) -> Vec<(u32, u32)> {
+    let mut out: Vec<(u32, u32)> = Vec::new();
+    for tok in raw.split(|c: char| {
+        c == ',' || c == ';' || c == '\n' || c == '\r' || c == '\t' || c == ' '
+    }) {
+        let t = tok.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let (a, b) = match t.split_once('-') {
+            Some((a, b)) => (a.trim(), b.trim()),
+            None => (t, t),
+        };
+        let (Ok(s), Ok(e)) = (a.parse::<std::net::Ipv4Addr>(), b.parse::<std::net::Ipv4Addr>())
+        else {
+            continue;
+        };
+        let (mut s, mut e) = (u32::from(s), u32::from(e));
+        if s > e {
+            std::mem::swap(&mut s, &mut e);
+        }
+        out.push((s, e));
+    }
+    out
+}
+
+/// Настроен ли фиксированный диапазон (непустой и корректный).
+pub fn fixed_ip_range_active() -> bool {
+    !FIXED_IP_RANGES.read().is_empty()
+}
+
+/// Выдаёт `count` следующих IP из диапазона (по кругу, начиная с курсора).
+/// Успешный IP из прошлого раза всегда идёт первым.
+pub fn fixed_range_next_ips(count: usize) -> Vec<String> {
+    let ranges = FIXED_IP_RANGES.read().clone();
+    let total: u64 = ranges
+        .iter()
+        .map(|(s, e)| (*e as u64 - *s as u64) + 1)
+        .sum();
+    if total == 0 || count == 0 {
+        return Vec::new();
+    }
+
+    let mut out: Vec<String> = Vec::with_capacity(count + 1);
+    let last_good = FIXED_IP_LAST_GOOD.read().clone();
+    if !last_good.is_empty() {
+        out.push(last_good);
+    }
+
+    let start = FIXED_IP_CURSOR.fetch_add(count as u64, Ordering::Relaxed) % total;
+    for i in 0..count as u64 {
+        let idx = (start + i) % total;
+        let mut acc: u64 = 0;
+        for (s, e) in &ranges {
+            let len = (*e as u64 - *s as u64) + 1;
+            if idx < acc + len {
+                let ip = std::net::Ipv4Addr::from((*s as u64 + (idx - acc)) as u32).to_string();
+                if !out.contains(&ip) {
+                    out.push(ip);
+                }
+                break;
+            }
+            acc += len;
+        }
+    }
+    out
+}
+
+pub fn set_fixed_ip_last_good(ip: &str) {
+    if ip.is_empty() {
+        return;
+    }
+    let mut g = FIXED_IP_LAST_GOOD.write();
+    if *g != ip {
+        *g = ip.to_string();
+    }
+}
+
+
 // Telegram protocols & DC mapping
 pub fn valid_proto(p: u32) -> bool {
     matches!(p, 0xEFEFEFEF | 0xEEEEEEEE | 0xDDDDDDDD)

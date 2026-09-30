@@ -90,6 +90,7 @@ fun SettingsTab(settingsStore: SettingsStore) {
     val savedCfEnabled by settingsStore.cfproxyEnabled.collectAsStateWithLifecycle(initialValue = true)
     val savedCustomDomainEnabled by settingsStore.customCfDomainEnabled.collectAsStateWithLifecycle(initialValue = false)
     val savedCustomDomain by settingsStore.customCfDomain.collectAsStateWithLifecycle(initialValue = "")
+    val savedFixedIpRange by settingsStore.fixedIpRange.collectAsStateWithLifecycle(initialValue = "")
     val autoStartOnBoot by settingsStore.autoStartOnBoot.collectAsStateWithLifecycle(initialValue = false)
     val savedSecretKey by settingsStore.secretKey.collectAsStateWithLifecycle(initialValue = "LOADING")
 
@@ -125,6 +126,7 @@ fun SettingsTab(settingsStore: SettingsStore) {
     var cfEnabled by rememberSaveable(savedCfEnabled) { mutableStateOf(savedCfEnabled) }
     var customCfDomainEnabled by rememberSaveable(savedCustomDomainEnabled) { mutableStateOf(savedCustomDomainEnabled) }
     var customCfDomain by rememberSaveable(savedCustomDomain) { mutableStateOf(savedCustomDomain) }
+    var fixedIpRange by rememberSaveable(savedFixedIpRange) { mutableStateOf(savedFixedIpRange) }
     var secretKeyText by remember(savedSecretKey) { mutableStateOf(if (savedSecretKey == "LOADING") "" else savedSecretKey) }
 
     LaunchedEffect(savedSecretKey) {
@@ -147,7 +149,7 @@ fun SettingsTab(settingsStore: SettingsStore) {
                 isDcAuto, dc1Text, dc2Text, dc3Text, dc4Text, dc5Text, dc203Text,
                 dc1mText, dc2mText, dc3mText, dc4mText, dc5mText, dc203mText,
                 experimentalMode, bindIpText, portText, selectedPoolSize,
-                cfEnabled, customCfDomainEnabled, customCfDomain, secretKeyText
+                cfEnabled, customCfDomainEnabled, customCfDomain, fixedIpRange, secretKeyText
             )
         }
     }
@@ -447,6 +449,24 @@ fun SettingsTab(settingsStore: SettingsStore) {
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
                     )
                 }
+                OutlinedTextField(
+                    value = fixedIpRange,
+                    onValueChange = {
+                        fixedIpRange = it
+                        scheduleSave()
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = false,
+                    minLines = 1,
+                    maxLines = 3,
+                    enabled = !isRunning,
+                    label = { Text(stringResource(com.amurcanov.tgwsproxy.R.string.fixed_ip_range)) },
+                    placeholder = { Text(stringResource(com.amurcanov.tgwsproxy.R.string.fixed_ip_range_hint)) },
+                    supportingText = {
+                        Text(stringResource(com.amurcanov.tgwsproxy.R.string.fixed_ip_range_description))
+                    },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
+                )
             }
 
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))

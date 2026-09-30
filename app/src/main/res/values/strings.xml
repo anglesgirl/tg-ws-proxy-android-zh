@@ -130,4 +130,7 @@
     <string name="interval_never">Never</string>
     <string name="interval_hours">%1$d h</string>
     <string name="port_is_not_available">Port %1$d is in use, please try another one</string>
+    <string name="fixed_ip_range">Fixed IP range</string>
+    <string name="fixed_ip_range_hint">104.16.0.1-104.20.255.255</string>
+    <string name="fixed_ip_range_description">Empty — resolve via DoH (Aliyun / Tencent / Volcengine, bare IP). Filled — DoH is skipped: IPs from this range are tried in order, round-robin. Separate several ranges with commas.</string>
 </resources>

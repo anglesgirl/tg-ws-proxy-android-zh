@@ -115,27 +115,31 @@ pub static DC_DEFAULT_IPS: Lazy<HashMap<i32, &'static str>> = Lazy::new(|| {
     m
 });
 
+// 非媒体 WS 统一连接的 zws 网关默认 IP（zws1-1.web.telegram.org，实测 0304 握手成功）
+// 界面设置里填写的 IP 优先于本默认值；IP 更换时直接改界面即可
+pub const ZWS_DEFAULT_IP: &str = "149.154.161.145";
+
 
 // ---------------------------------------------------------------------------
-// Fixed IP range (вместо DoH-результата для CF-доменов)
+// Fixed IP range (替代 DoH 结果，用于 CF 域名)
 // ---------------------------------------------------------------------------
-// Пользователь задаёт диапазон вида "104.16.0.1-104.20.255.255"; допускается
-// несколько диапазонов через запятую/точку с запятой/пробел/перевод строки.
-// Если диапазон задан — DoH НЕ используется вообще: IP берутся прямо из
-// диапазона и перебираются по кругу (курсор сдвигается на каждую попытку,
-// поэтому большие диапазоны тоже постепенно проходятся).
+// 用户可指定形如 "104.16.0.1-104.20.255.255" 的区间；允许
+// 多个区间用逗号/分号/空格/换行分隔。
+// 指定区间后完全不使用 DoH：IP 直接从区间取出，
+// 循环遍历（每次尝试推进游标，
+// 因此大区间也能逐步遍历完）。
 pub static FIXED_IP_RANGES: Lazy<RwLock<Vec<(u32, u32)>>> =
     Lazy::new(|| RwLock::new(Vec::new()));
 pub static FIXED_IP_CURSOR: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
-// Последний успешно подключившийся IP — пробуем его первым.
+// 上次成功连接的 IP 优先尝试。
 pub static FIXED_IP_LAST_GOOD: Lazy<RwLock<String>> =
     Lazy::new(|| RwLock::new(String::new()));
 
-// Сколько IP из диапазона пробуем за одну попытку соединения.
+// 单次连接尝试从区间中试多少个 IP。
 pub const FIXED_IP_TRIES_PER_CONNECT: usize = 4;
 
-/// Разбирает "a.b.c.d-e.f.g.h" (одну или несколько записей) в список интервалов.
+/// 把 "a.b.c.d-e.f.g.h"（一条或多条）解析为区间列表。
 pub fn parse_fixed_ip_ranges(raw: &str) -> Vec<(u32, u32)> {
     let mut out: Vec<(u32, u32)> = Vec::new();
     for tok in raw.split(|c: char| {
@@ -162,13 +166,13 @@ pub fn parse_fixed_ip_ranges(raw: &str) -> Vec<(u32, u32)> {
     out
 }
 
-/// Настроен ли фиксированный диапазон (непустой и корректный).
+/// 是否配置了固定区间（非空且合法）。
 pub fn fixed_ip_range_active() -> bool {
     !FIXED_IP_RANGES.read().is_empty()
 }
 
-/// Выдаёт `count` следующих IP из диапазона (по кругу, начиная с курсора).
-/// Успешный IP из прошлого раза всегда идёт первым.
+/// 从区间中取出接下来 `count` 个 IP（自游标起循环）。
+/// 上次成功的 IP 总是排最前。
 pub fn fixed_range_next_ips(count: usize) -> Vec<String> {
     let ranges = FIXED_IP_RANGES.read().clone();
     let total: u64 = ranges
@@ -279,7 +283,7 @@ impl Stats {
     }
 
     pub fn summary_ru(&self) -> String {
-        let mut parts = vec![format!("акт:{}", self.connections_active.load(Ordering::Relaxed))];
+        let mut parts = vec![format!("活动:{}", self.connections_active.load(Ordering::Relaxed))];
         let ws = self.connections_ws.load(Ordering::Relaxed);
         if ws > 0 {
             parts.push(format!("ws:{}", ws));
@@ -294,7 +298,7 @@ impl Stats {
         }
         let err = self.ws_errors.load(Ordering::Relaxed);
         if err > 0 {
-            parts.push(format!("ош:{}", err));
+            parts.push(format!("错误:{}", err));
         }
         parts.push(format!(
             "↑{} ↓{}",
@@ -334,7 +338,7 @@ pub fn human_bytes(n: i64) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Logger (Android log + stderr, 1-в-1 префиксы)
+// 日志器（Android log + stderr，前缀一一对应）
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "android")]

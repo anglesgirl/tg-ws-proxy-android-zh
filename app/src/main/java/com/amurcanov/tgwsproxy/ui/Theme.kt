@@ -28,7 +28,7 @@ import com.amurcanov.tgwsproxy.R
 // ═══ System Font Family ═══
 val AppFontFamily = FontFamily.Default
 
-// ═══ Типография ═══
+// ═══ 字体排印 ═══
 val TgWsProxyTypography = Typography(
     displayLarge = TextStyle(fontFamily = AppFontFamily, fontWeight = FontWeight.Bold, fontSize = 57.sp, lineHeight = 64.sp),
     displayMedium = TextStyle(fontFamily = AppFontFamily, fontWeight = FontWeight.Bold, fontSize = 45.sp, lineHeight = 52.sp),
@@ -47,7 +47,7 @@ val TgWsProxyTypography = Typography(
     labelSmall = TextStyle(fontFamily = AppFontFamily, fontWeight = FontWeight.Medium, fontSize = 11.sp, lineHeight = 16.sp, letterSpacing = 0.5.sp),
 )
 
-// ═══ Светлая палитра — «Раф на кокосовом молоке» ═══
+// ═══ 浅色配色 — 「椰奶拉芙」 ═══
 private val LightColorScheme = lightColorScheme(
     primary = Color(0xFF6D4C41),
     onPrimary = Color(0xFFFFFFFF),
@@ -79,7 +79,7 @@ private val LightColorScheme = lightColorScheme(
     surfaceTint = Color(0xFF6D4C41),
 )
 
-// ═══ Тёмная палитра — «Эспрессо» ═══
+// ═══ 深色配色 — 「浓缩咖啡」 ═══
 private val DarkColorScheme = darkColorScheme(
     primary = Color(0xFFD7CCC8),
     onPrimary = Color(0xFF3E2723),
@@ -111,7 +111,7 @@ private val DarkColorScheme = darkColorScheme(
     surfaceTint = Color(0xFFD7CCC8),
 )
 
-// ═══ Тёмная палитра — «Цвет 1» ═══
+// ═══ 深色配色 — 「颜色 1」 ═══
 private val IndigoLightColorScheme = lightColorScheme(
     primary = Color(0xFF5B588D),
     onPrimary = Color(0xFFFFFFFF),
@@ -150,7 +150,7 @@ private val IndigoDarkColorScheme = darkColorScheme(
     outlineVariant = Color(0xFF47464F),
 )
 
-// ═══ Палитра «Цвет 2» ═══
+// ═══ 配色 — 「颜色 2」 ═══
 private val ForestLightColorScheme = lightColorScheme(
     primary = Color(0xFF5F5D68),
     onPrimary = Color(0xFFFFFFFF),
@@ -197,7 +197,7 @@ private fun getAppColorScheme(palette: String, isDark: Boolean): androidx.compos
     }
 }
 
-// ═══ Расширенные цвета для кастомных элементов ═══
+// ═══ 自定义元素的扩展色 ═══
 object AppColors {
     val connected = Color(0xFF4CAF50)
     val connectedContainer = Color(0xFF4CAF50).copy(alpha = 0.12f)

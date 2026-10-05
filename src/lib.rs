@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
 
-// Глобальный рантайм — никогда не дропается
+// 全局运行时——从不被释放
 static RUNTIME: OnceCell<Runtime> = OnceCell::new();
 
 struct ProxyState {
@@ -34,7 +34,7 @@ fn state_cell() -> &'static Mutex<Option<ProxyState>> {
 
 fn runtime() -> &'static Runtime {
     RUNTIME.get_or_init(|| {
-        // Многопоточный рантайм, кол-во воркеров адекватно мобиле
+        // 多线程运行时，工作线程数适配手机
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(4)
             .thread_name("tgwsproxy-rt")
@@ -56,7 +56,7 @@ fn cstr_to_string(p: *const c_char) -> String {
 // ---------------------------------------------------------------------------
 
 /// # Safety
-/// Указатели должны быть валидными C-строками (или null).
+/// 指针必须是合法的 C 字符串（或 null）。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn StartProxy(
     c_host: *const c_char,
@@ -95,7 +95,7 @@ pub unsafe extern "C" fn StartProxy(
     let cancel_tasks = CancellationToken::new();
     let pool = Arc::new(WsPool::new(cancel_tasks.clone()));
 
-    // Канал готовности: ждём успешного bind перед возвратом
+    // 就绪通道：返回前等待 bind 成功
     let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
 
     let pool_task = pool.clone();
@@ -104,7 +104,7 @@ pub unsafe extern "C" fn StartProxy(
     let cancel_root = cancel_tasks.clone();
 
     let handle = rt.spawn(async move {
-        // Предварительный bind для сигнала готовности
+        // 为就绪信号预先 bind
         let addr = format!("{}:{}", host_task, go_port);
         match tokio::net::TcpListener::bind(&addr).await {
             Ok(listener) => {
@@ -121,7 +121,7 @@ pub unsafe extern "C" fn StartProxy(
         }
     });
 
-    // Ждём результат bind
+    // 等待 bind 结果
     match rx.recv() {
         Ok(Ok(())) => {}
         Ok(Err(_)) => {
@@ -153,7 +153,7 @@ pub extern "C" fn StopProxy() -> c_int {
         None => return -1,
     };
 
-    // graceful shutdown — НЕ дропаем рантайм
+    // 优雅关闭——不释放运行时
     linfo!("StopProxy: cancelling all tasks");
     state.cancel_tasks.cancel();
 
@@ -190,7 +190,7 @@ pub extern "C" fn SetPoolSize(size: c_int) {
 }
 
 /// # Safety
-/// `c_cache_dir` — валидная C-строка или null.
+/// `c_cache_dir` — 合法 C 字符串或 null。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SetCfProxyCacheDir(c_cache_dir: *const c_char) {
     let dir = cstr_to_string(c_cache_dir);
@@ -198,7 +198,7 @@ pub unsafe extern "C" fn SetCfProxyCacheDir(c_cache_dir: *const c_char) {
 }
 
 /// # Safety
-/// `c_user_domain` — валидная C-строка или null.
+/// `c_user_domain` — 合法 C 字符串或 null。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SetCfProxyConfig(
     enabled: c_int,
@@ -216,7 +216,7 @@ pub unsafe extern "C" fn SetCfProxyConfig(
 }
 
 /// # Safety
-/// `c_secret` — валидная C-строка или null.
+/// `c_secret` — 合法 C 字符串或 null。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SetSecret(c_secret: *const c_char) {
     let s = cstr_to_string(c_secret);
@@ -230,9 +230,9 @@ pub unsafe extern "C" fn SetSecret(c_secret: *const c_char) {
 }
 
 /// # Safety
-/// `c_range` — валидная C-строка или null. Формат: "a.b.c.d-e.f.g.h",
-/// несколько диапазонов через запятую/точку с запятой/пробел.
-/// Пустая строка = фиксированный диапазон выключен (используется DoH).
+/// `c_range` — 合法 C 字符串或 null。格式："a.b.c.d-e.f.g.h"，
+/// 多个区间用逗号/分号/空格分隔。
+/// 空字符串 = 固定区间关闭（改用 DoH）。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SetFixedIpRange(c_range: *const c_char) {
     let raw = cstr_to_string(c_range);
@@ -242,15 +242,15 @@ pub unsafe extern "C" fn SetFixedIpRange(c_range: *const c_char) {
         .map(|(s, e)| (*e as u64 - *s as u64) + 1)
         .sum();
     if raw.trim().is_empty() {
-        linfo!("SetFixedIpRange: пусто — фиксированный диапазон выключен (DoH)");
+        linfo!("SetFixedIpRange: 空 — 固定区间关闭（DoH）");
     } else if ranges.is_empty() {
         lerror!(
-            "SetFixedIpRange: не удалось разобрать '{}' (ожидается a.b.c.d-e.f.g.h)",
+            "SetFixedIpRange: 解析 '{}' 失败（应为 a.b.c.d-e.f.g.h）",
             raw.trim()
         );
     } else {
         linfo!(
-            "SetFixedIpRange: {} интервал(ов), {} адрес(ов) всего",
+            "SetFixedIpRange: {} 个区间，共 {} 个地址",
             ranges.len(),
             total
         );
@@ -273,7 +273,7 @@ pub extern "C" fn GetSecretWithPrefix() -> *mut c_char {
 }
 
 /// # Safety
-/// `p` должен быть указателем, ранее возвращённым из этой библиотеки.
+/// `p` 必须是由本库此前返回的指针。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn FreeString(p: *mut c_char) {
     if p.is_null() {

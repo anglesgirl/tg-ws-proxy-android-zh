@@ -28,7 +28,7 @@ pub const OP_PING: u8 = 0x9;
 pub const OP_PONG: u8 = 0xA;
 
 // ---------------------------------------------------------------------------
-// TLS config: InsecureSkipVerify + session cache (как в Go)
+// TLS 配置：跳过证书校验 + 会话缓存（同 Go 实现）
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
@@ -82,7 +82,7 @@ impl ServerCertVerifier for NoVerify {
 
 use once_cell::sync::Lazy;
 
-// Глобальный TLS-конфиг с session resumption cache (аналог tls.NewLRUClientSessionCache(100))
+// 全局 TLS 配置 + 会话恢复缓存（相当于 tls.NewLRUClientSessionCache(100)）
 static TLS_CONFIG: Lazy<Arc<ClientConfig>> = Lazy::new(|| {
     let mut cfg = ClientConfig::builder()
         .dangerous()
@@ -236,7 +236,7 @@ impl RawWebSocket {
         }
     }
 
-    // Recv обрабатывает контрольные фреймы (как Go Recv)
+    // Recv 处理控制帧（同 Go Recv）
     pub async fn recv(&self) -> Result<Vec<u8>, WsError> {
         while !self.is_closed() {
             let (opcode, payload) = match self.read_frame().await {
@@ -285,10 +285,10 @@ impl RawWebSocket {
         // Skipping writer.shutdown().await to avoid hanging on dead connections
     }
 
-    // recv с дедлайном чтения (для bridge).
-    // ВАЖНО: таймаут оборачивает только чтение ОДНОГО фрейма целиком под
-    // удержанием lock, чтобы НЕ дропать future посреди read_exact (иначе
-    // теряются уже прочитанные байты BufReader → рассинхрон потока).
+    // 带读取截止时间的 recv（用于桥接）。
+    // 重要：超时只包裹在持有锁时完整读取单个帧的过程，
+    // 避免在 read_exact 中途丢弃 future（否则
+    // 已读入 BufReader 的字节会丢失 → 流不同步）。
     pub async fn recv_with_timeout(&self, dur: Duration) -> Result<Vec<u8>, WsError> {
         loop {
             if self.is_closed() {
@@ -374,8 +374,8 @@ impl RawWebSocket {
     }
 }
 
-// Чтение одного фрейма из уже захваченного reader (без повторного lock).
-// Используется recv_with_timeout, чтобы держать lock на всё время чтения фрейма.
+// 从已持有的 reader 读取单个帧（不再重复加锁）。
+// 供 recv_with_timeout 使用，使整个读帧期间保持锁。
 async fn read_frame_locked(
     reader: &mut BufReader<tokio::io::ReadHalf<TlsStream<TcpStream>>>,
 ) -> Result<(u8, Vec<u8>), WsError> {
@@ -416,7 +416,7 @@ async fn read_frame_locked(
 }
 
 // ---------------------------------------------------------------------------
-// Frame builder (mask=true всегда для клиента)
+// 帧构造器（客户端恒为 mask=true）
 // ---------------------------------------------------------------------------
 
 pub fn build_frame(opcode: u8, data: &[u8], mask: bool) -> Vec<u8> {
@@ -491,7 +491,7 @@ fn set_sock_opts(stream: &TcpStream) {
     if TCP_NODELAY {
         let _ = stream.set_nodelay(true);
     }
-    // Аналог Go: SetKeepAlive(true)+SetKeepAlivePeriod(30s) — детект мёртвых соединений на мобиле.
+    // 对应 Go 的 SetKeepAlive(true)+SetKeepAlivePeriod(30s)——用于检测手机端失效连接。
     let sock = socket2::SockRef::from(stream);
     let ka = socket2::TcpKeepalive::new().with_time(Duration::from_secs(30));
     let _ = sock.set_tcp_keepalive(&ka);
@@ -520,7 +520,7 @@ fn server_name(domain: &str) -> ServerName<'static> {
         .unwrap_or_else(|_| ServerName::IpAddress("127.0.0.1".parse::<IpAddr>().unwrap().into()))
 }
 
-// wsConnectOnce — заголовки 1-в-1 как в Python raw_websocket.py (без User-Agent).
+// wsConnectOnce — 请求头与 Python raw_websocket.py 完全一致（不带 User-Agent）。
 pub async fn ws_connect_once(
     dial_addr: &str,
     domain: &str,
@@ -586,7 +586,7 @@ pub async fn ws_connect_once(
 
     let mut bufreader = BufReader::with_capacity(4096, read_half);
 
-    // читаем заголовки строками
+    // 按行读取响应头
     let mut response_lines: Vec<String> = Vec::new();
     let read_result = tokio::time::timeout(timeout, async {
         loop {
@@ -674,7 +674,7 @@ async fn read_line<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<String, Ws
     Ok(String::from_utf8_lossy(&buf).to_string())
 }
 
-// wsConnect: пытается ip, при необходимости резолвит DoH
+// wsConnect：尝试指定 IP，必要时用 DoH 解析
 pub async fn ws_connect(
     ip: &str,
     domain: &str,
@@ -694,7 +694,7 @@ pub async fn ws_connect(
         Ok(ws) => return Ok(ws),
         Err(e) => {
             if primary_addr == domain && primary_addr.parse::<IpAddr>().is_err() {
-                // Фиксированный диапазон IP: DoH не используется вообще.
+                // 固定 IP 区间：完全不使用 DoH。
                 if crate::config::fixed_ip_range_active() {
                     let candidates = crate::config::fixed_range_next_ips(
                         crate::config::FIXED_IP_TRIES_PER_CONNECT,
@@ -720,7 +720,7 @@ pub async fn ws_connect(
     }
 }
 
-// connectOneWS: перебор доменов
+// connectOneWS：遍历域名
 pub async fn connect_one_ws(ip: &str, domains: &[String]) -> Option<RawWebSocket> {
     for d in domains {
         if let Ok(ws) = ws_connect(ip, d, "/apiws", WS_POOL_CONNECT_TIMEOUT).await {

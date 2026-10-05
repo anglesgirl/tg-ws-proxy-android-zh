@@ -128,7 +128,7 @@ class ProxyService : Service() {
                 true
             }
         } catch (_: Exception) {
-            // (Если надо, то тут может быть IOException или SecurityException) (IOException добавляет новый import так что "_", по-моему, лучше)
+            // （如有需要，这里可能抛出 IOException 或 SecurityException）（IOException 需要新 import，所以用 "_" 我觉得更好）
             return false;
         }
     }

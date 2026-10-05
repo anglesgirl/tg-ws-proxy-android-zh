@@ -46,8 +46,8 @@ object NativeProxy {
     }
 
     /**
-     * Фиксированный диапазон IP для CF-доменов, например "104.16.0.1-104.20.255.255".
-     * Пустая строка — диапазон выключен, используется DoH.
+     * 用于 CF 域名的固定 IP 区间，例如 "104.16.0.1-104.20.255.255"。
+     * 空字符串 — 区间关闭，使用 DoH。
      */
     fun setFixedIpRange(range: String) {
         ProxyLibrary.INSTANCE.SetFixedIpRange(range)

@@ -139,7 +139,7 @@ pub fn retry_after_delay(err: &WsError) -> Duration {
             return Duration::from_secs(seconds as u64);
         }
     }
-    // http date parse (best-effort): пропускаем, как маловероятный кейс
+    // HTTP date 解析（尽力而为）：跳过此低概率场景
     Duration::ZERO
 }
 
@@ -238,7 +238,7 @@ fn cfproxy_cache_path() -> Option<PathBuf> {
     Some(PathBuf::from(dir).join(CFPROXY_CACHE_FILE_NAME))
 }
 
-// Активный домен больше не сохраняется в отдельный файл. Балансер работает в памяти.
+// 活动域名不再保存到单独文件，均衡器在内存中工作。
 
 fn load_cfproxy_domains_from_cache() -> Vec<String> {
     let path = match cfproxy_cache_path() {
@@ -265,13 +265,13 @@ fn save_cfproxy_domains_to_cache(domains: &[String]) {
     }
     if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
-            ldebug!(" CF: кеш создать не удалось: {}", e);
+            ldebug!(" CF: 缓存创建失败: {}", e);
             return;
         }
     }
     let data = domains.join("\n");
     if let Err(e) = std::fs::write(&path, data) {
-        ldebug!(" CF: кеш сохранить не удалось: {}", e);
+        ldebug!(" CF: 缓存保存失败: {}", e);
     }
 }
 
@@ -315,7 +315,7 @@ pub fn init_cfproxy_domains() {
         cfg.domains = merge_cfproxy_domains(&[cached, defaults]);
         crate::balancer::BALANCER.write().update_domains_list(&cfg.domains);
         drop(cfg);
-        linfo!(" CF: кеш доменов загружен ({} шт.)", n);
+        linfo!(" CF: 域名缓存已加载（{} 个）", n);
     } else {
         cfg.domains = defaults;
         crate::balancer::BALANCER.write().update_domains_list(&cfg.domains);
@@ -324,7 +324,7 @@ pub fn init_cfproxy_domains() {
 
 pub fn start_cfproxy_refresh() {
     if !should_refresh_cfproxy_domains() {
-        ldebug!(" CF: кеш свежий, пропускаю обновление списка");
+        ldebug!(" CF: 缓存仍新鲜，跳过列表更新");
         return;
     }
     tokio::spawn(async move {
@@ -334,7 +334,7 @@ pub fn start_cfproxy_refresh() {
             }
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
-        ldebug!(" CF: обновить список доменов не удалось, остаюсь на кеше/встроенном списке");
+        ldebug!(" CF: 更新域名列表失败，沿用缓存/内置列表");
     });
 }
 
@@ -360,18 +360,18 @@ pub async fn try_refresh_cfproxy_domains() -> bool {
     {
         Ok(r) => r,
         Err(e) => {
-            ldebug!(" CF: GitHub недоступен: {}", e);
+            ldebug!(" CF: GitHub 不可达: {}", e);
             return false;
         }
     };
     if resp.status().as_u16() != 200 {
-        ldebug!(" CF: GitHub вернул {}", resp.status().as_u16());
+        ldebug!(" CF: GitHub 返回 {}", resp.status().as_u16());
         return false;
     }
     let body = match resp.text().await {
         Ok(b) => b,
         Err(e) => {
-            ldebug!(" CF: список доменов прочитать не удалось: {}", e);
+            ldebug!(" CF: 读取域名列表失败: {}", e);
             return false;
         }
     };
@@ -399,7 +399,7 @@ pub async fn try_refresh_cfproxy_domains() -> bool {
         }
         crate::balancer::BALANCER.write().update_domains_list(&merged);
         save_cfproxy_domains_to_cache(&merged);
-        linfo!(" CF: список доменов обновлен ({} шт.)", new_domains.len());
+        linfo!(" CF: 域名列表已更新（{} 个）", new_domains.len());
         return true;
     }
     false
@@ -425,17 +425,17 @@ struct DohResponse {
 static DOH_CACHE: Lazy<parking_lot::RwLock<std::collections::HashMap<String, (String, Instant)>>> =
     Lazy::new(|| parking_lot::RwLock::new(std::collections::HashMap::new()));
 
-// Внутренние (CN) DoH доступны по «голым» IP: резолвить их домены не нужно,
-// поэтому они работают и при ужатом/подменённом DNS.
+// 境内 (CN) DoH 可用裸 IP 访问：无需解析其域名，
+// 因此在 DNS 被压缩/篡改时依然可用。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DohKind {
-    // Ali: /dns-query принимает только проводной формат (dns=), а /resolve — JSON.
+    // Ali：/dns-query 只接受有线格式（dns=），/resolve 才是 JSON。
     Json,
     // RFC 8484 GET ?dns=<base64url> (Tencent, Volcengine, Ali /dns-query).
     Wire,
 }
 
-/// Собирает DNS-запрос A/IN и кодирует его в base64url (без padding).
+/// 构造 A/IN DNS 查询并编码为 base64url（无填充）。
 fn build_dns_query_b64(domain: &str) -> Option<String> {
     let mut q: Vec<u8> = Vec::with_capacity(64);
     q.extend_from_slice(&[0x12, 0x34]);
@@ -456,7 +456,7 @@ fn build_dns_query_b64(domain: &str) -> Option<String> {
     Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&q))
 }
 
-/// Достаёт IPv4-адреса из проводного DNS-ответа.
+/// 从有线 DNS 响应中取出 IPv4 地址。
 fn parse_a_records(buf: &[u8]) -> Vec<String> {
     fn skip_name(buf: &[u8], mut pos: usize) -> usize {
         loop {
@@ -538,7 +538,7 @@ pub async fn resolve_doh(domain: &str) -> Option<String> {
         }
     }
 
-    // Голые IP, без резолва доменов: 阿里云 (223.5.5.5/223.6.6.6),
+    // 裸 IP，不解析域名：阿里云 (223.5.5.5/223.6.6.6)，
     // 腾讯云 dnspod (1.12.12.12/120.53.53.53), 火山引擎 (180.184.1.1/180.184.2.2).
     let endpoints: [(&str, DohKind); 6] = [
         ("https://223.5.5.5/resolve", DohKind::Json),
@@ -604,10 +604,10 @@ pub async fn resolve_doh(domain: &str) -> Option<String> {
         }));
     }
 
-    // Системный (UDP) resolver убран намеренно: в CN он отдаёт подменённые
-    // адреса и успевал выиграть гонку у DoH, ломая соединение.
+    // 刻意移除系统 (UDP) 解析器：境内它返回被篡改的
+    // 地址，且常抢在 DoH 之前返回，导致连接失败。
 
-    drop(tx); // Чтобы rx.recv() завершился, когда все таски завершатся
+    drop(tx); // 使所有任务完成后 rx.recv() 结束
 
     let deadline = tokio::time::sleep(Duration::from_millis(1500));
     tokio::pin!(deadline);
@@ -624,14 +624,14 @@ pub async fn resolve_doh(domain: &str) -> Option<String> {
                         final_ip = Some(ip);
                         break;
                     }
-                    Some(None) => {} // Таска ничего не нашла
-                    None => break,   // Все таски завершились
+                    Some(None) => {} // 该任务未找到结果
+                    None => break,   // 所有任务已结束
                 }
             }
         }
     }
 
-    // Отменяем все незавершенные фоновые таски (исправление утечки)
+    // 取消所有未完成的后续任务（修复泄漏）
     for t in tasks {
         t.abort();
     }
@@ -682,8 +682,8 @@ pub async fn cf_connect_domain(
                 return (None, String::new(), Some(host_err));
             }
 
-            // Фиксированный диапазон IP: DoH не спрашиваем вообще, перебираем
-            // адреса прямо из заданного пользователем диапазона.
+            // 固定 IP 区间：完全不问 DoH，遍历
+            // 用户指定区间内的地址。
             if fixed_ip_range_active() {
                 let ip_timeout = new_timed_attempt_timeout(phase_timeout, phase_timeout);
                 let candidates = fixed_range_next_ips(FIXED_IP_TRIES_PER_CONNECT);
@@ -706,7 +706,7 @@ pub async fn cf_connect_domain(
                     }
                 }
                 ldebug!(
-                    " CF fixed {} -> нет ответа, диапазон: {}",
+                    " CF 固定 {} -> 无响应，区间: {}",
                     domain,
                     tried.join(",")
                 );
@@ -741,7 +741,7 @@ pub fn log_cf_conn_error(msg: &str, err: &WsError) {
     }
 }
 
-// активный домен set/save
+// 活动域名 set/save
 pub fn set_active_domain_and_save(_chosen: &str) {
-    // Больше не используется для файлов. Балансер обновляется внутри proxy.rs
+    // 不再用于文件。均衡器在 proxy.rs 内部更新。
 }

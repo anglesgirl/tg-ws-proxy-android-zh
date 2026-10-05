@@ -213,7 +213,7 @@ fun SettingsTab(settingsStore: SettingsStore) {
                     )
                 }
                 Text(
-                    "IP и Порт",
+                    "IP 和端口",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.padding(start = 8.dp, bottom = 4.dp)

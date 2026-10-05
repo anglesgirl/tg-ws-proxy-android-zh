@@ -54,10 +54,11 @@ pub fn ws_domains(dc: i32, is_media: bool) -> Vec<String> {
             format!("kws{}.web.telegram.org", effective_dc),
         ]
     } else {
-        // -1 优先：实测 DC1 只有 kws1-1 可握手（kws1 不带 -1 被 RESET）
+        // 非媒体统一走 zws1-1 网关（zws 不受 kws 的 DC 绑定限制，
+        // 内层 MTProto 自带 dc_id，zws 网关按 dc_id 路由到对应 DC）
         vec![
-            format!("kws{}-1.web.telegram.org", effective_dc),
-            format!("kws{}.web.telegram.org", effective_dc),
+            "zws1-1.web.telegram.org".to_string(),
+            "zws1.web.telegram.org".to_string(),
         ]
     }
 }
@@ -563,7 +564,7 @@ pub async fn tcp_fallback(
     let _ = remote.set_nodelay(true);
 
     STATS.connections_tcp_fallback.fetch_add(1, Ordering::Relaxed);
-    linfo!(" DC{}{} подключен по TCP", dc, media_tag(is_media));
+    linfo!(" DC{}{} 已通过 TCP 连接", dc, media_tag(is_media));
     if remote.write_all(init).await.is_err() {
         return false;
     }
@@ -617,8 +618,8 @@ async fn try_cfproxy_base_domain(dc: i32, base_domain: &str) -> (Option<RawWebSo
 
     let (ws, resolved_ip, err) = cf_connect_domain(&domain, "/apiws", 5.0).await;
     if let Some(e) = err {
-        // ВАЖНО (как в Go): cooldown ставим ТОЛЬКО при HTTP 429, иначе
-        // любой reset/timeout выжигал бы домены и плодил лавину cooldown.
+        // 重要（同 Go 实现）：仅在 HTTP 429 时设置冷却，否则
+        // 任何 reset/超时都会烧掉域名并引发冷却雪崩。
         if is_http_status_error(&e, 429) {
             mark_cfproxy_429_cooldown(&base_domain, &e);
         }
@@ -642,9 +643,9 @@ async fn try_cfproxy_base_domain(dc: i32, base_domain: &str) -> (Option<RawWebSo
     (ws, base_domain)
 }
 
-// Только устанавливает WS-соединение через CF, НЕ трогая conn.
-// Возвращает (ws, chosen_domain). Это позволяет при провале CF
-// переиспользовать conn для TCP fallback (семантика Go сохранена).
+// 仅通过 CF 建立 WS 连接，不动 conn。
+// 返回 (ws, chosen_domain)。这样 CF 失败时
+// 可用同一 conn 做 TCP 回退（语义与 Go 一致）。
 async fn cfproxy_acquire_ws(
     dc: i32,
     is_media: bool,
@@ -668,7 +669,7 @@ async fn cfproxy_acquire_ws(
     }
 
     let m_tag = media_tag(is_media);
-    ldebug!(" CF fallback DC{}{}: {} домен(ов)", dc, m_tag, ordered.len());
+    ldebug!(" CF 回退 DC{}{}: {} 个域名", dc, m_tag, ordered.len());
 
     let mut ws: Option<RawWebSocket> = None;
     let mut chosen_domain = String::new();
@@ -715,21 +716,21 @@ async fn cfproxy_acquire_ws(
         Some(w) => {
             if !chosen_domain.is_empty() {
                 if crate::balancer::BALANCER.write().update_domain_for_dc(dc, &chosen_domain) {
-                    linfo!(" CF домен для DC{} -> {}", dc, chosen_domain);
+                    linfo!(" CF 域名 DC{} -> {}", dc, chosen_domain);
                 }
             }
             Some((w, chosen_domain))
         }
         None => {
-            lwarn!(" CF fallback DC{}{}: все CF домены недоступны", dc, m_tag);
+            lwarn!(" CF 回退 DC{}{}: 所有 CF 域名均不可用", dc, m_tag);
             None
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// doFallback — теперь CF не "съедает" conn при провале; при неуспехе CF
-// тот же conn уходит в TCP fallback (1-в-1 как Go doFallback).
+// doFallback — 现在 CF 失败时不会消耗 conn；CF 失败后
+// 同一 conn 进入 TCP 回退（与 Go doFallback 完全一致）。
 // ---------------------------------------------------------------------------
 
 pub async fn do_fallback(
@@ -745,7 +746,7 @@ pub async fn do_fallback(
     tg_dec: &TrackedStream,
     cancel_token: CancellationToken,
 ) -> bool {
-    // Clone streams (как Go Clone())
+    // 克隆流（同 Go Clone()）
     let clt_dec = clt_dec.clone_state();
     let clt_enc = clt_enc.clone_state();
     let tg_enc = tg_enc.clone_state();
@@ -755,16 +756,16 @@ pub async fn do_fallback(
     let use_cf = CFPROXY_ENABLED.load(Ordering::Relaxed);
 
     if use_cf {
-        // Сначала добываем WS через CF, conn не трогаем.
+        // 先通过 CF 获取 WS，不碰 conn。
         if let Some((ws, chosen_domain)) =
             cfproxy_acquire_ws(dc, is_media, &cancel_token).await
         {
             STATS.connections_cfproxy.fetch_add(1, Ordering::Relaxed);
-            linfo!(" DC{}{} подключен через CF", dc, media_tag(is_media));
+            linfo!(" DC{}{} 已通过 CF 连接", dc, media_tag(is_media));
 
             if ws.send(relay_init).await.is_err() {
                 ws.close().await;
-                // CF умер сразу после хендшейка — пробуем TCP на том же conn.
+                // CF 在握手后立即失效——尝试用同一 conn 走 TCP。
                 if !fallback_dst.is_empty() {
                     return tcp_fallback(
                         conn,
@@ -803,7 +804,7 @@ pub async fn do_fallback(
             .await;
             return true;
         }
-        // CF не дал ws — conn НЕ тронут, идём в TCP fallback ниже.
+        // CF 未能提供 ws — conn 未被使用，进入下方 TCP 回退。
     }
 
     if !fallback_dst.is_empty() {
@@ -855,7 +856,7 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
     let current_secret = PROXY_SECRET.read().clone();
     let secret_bytes = hex::decode(&current_secret).unwrap_or_default();
 
-    // 64-байтный handshake
+    // 64 字节握手
     let mut handshake = [0u8; 64];
     match tokio::time::timeout(Duration::from_secs(10), conn.read_exact(&mut handshake)).await {
         Ok(Ok(_)) => {}
@@ -904,7 +905,7 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
     hash_enc.update(&secret_bytes);
     let clt_encryptor = new_aes_ctr(&hash_enc.finalize(), &clt_enc_prekey_and_iv[32..]);
 
-    // relayInit генерация (1-в-1 c Go)
+    // relayInit 生成（与 Go 完全一致）
     let mut relay_init = [0u8; 64];
     loop {
         rand::thread_rng().fill_bytes(&mut relay_init);
@@ -965,8 +966,16 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
     let splitter = MsgSplitter::new(&relay_init, proto);
 
     let target_opt = resolve_configured_target(dc, is_media);
-    let dc_configured = target_opt.is_some();
-    let target = target_opt.unwrap_or_default();
+    // 非媒体：无条件走 zws WS 主路径（界面填的 IP 优先，没填用默认 zws IP）
+    // 媒体：保留原逻辑（界面优先，没配则走 do_fallback）
+    let dc_configured = target_opt.is_some() || !is_media;
+    let target = if let Some(t) = target_opt {
+        t
+    } else if is_media {
+        resolve_fallback_target(dc, true)
+    } else {
+        crate::config::ZWS_DEFAULT_IP.to_string()
+    };
 
     let blacklisted = WS_BLACKLIST.read().get(&dc_key).copied().unwrap_or(false);
 
@@ -1004,10 +1013,10 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
         };
 
     if ws_opt.is_none() {
-        lwarn!(" DC{}{}: все попытки WS провалены (DPI/Интернет)", dc, m_tag);
+        lwarn!(" DC{}{}: 所有 WS 尝试均失败（DPI/网络）", dc, m_tag);
         if ws_failed_redirect && all_redirects {
             WS_BLACKLIST.write().insert(dc_key, true);
-            lwarn!(" DC{}{} заблокирован (302)", dc, m_tag);
+            lwarn!(" DC{}{} 已被封锁（302）", dc, m_tag);
         } else {
             DC_FAIL_UNTIL.write().insert(dc_key, now + DC_FAIL_COOLDOWN);
         }
@@ -1047,7 +1056,7 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
             None => {
                 if retry_failed_redirect && retry_all_redirects {
                     WS_BLACKLIST.write().insert(dc_key, true);
-                    lwarn!(" DC{}{} заблокирован (302)", dc, m_tag);
+                    lwarn!(" DC{}{} 已被封锁（302）", dc, m_tag);
                 }
                 lwarn!(" direct fallback DC{}{}", dc, m_tag);
                 let splitter_fb = MsgSplitter::new(&relay_init, proto);
@@ -1178,8 +1187,8 @@ pub async fn run_proxy(
     }
 
     linfo!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    linfo!("  TG WS Proxy запущен");
-    linfo!("  Адрес: {}:{}", host, port);
+    linfo!("  TG WS Proxy 已启动");
+    linfo!("  地址: {}:{}", host, port);
 
     let cancel_stats = cancel_root.clone();
     tokio::spawn(async move {

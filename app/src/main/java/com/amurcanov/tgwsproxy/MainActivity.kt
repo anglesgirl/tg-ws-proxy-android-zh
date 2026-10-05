@@ -719,7 +719,7 @@ object LogManager {
                      return null // Handled above, but just in case
                 }
 
-                // Strip dynamic metrics like ↑3.3KB ↓1.1KB 0.3с so that lines can collapse
+                // 去除 ↑3.3KB ↓1.1KB 0.3秒 这类动态指标，让日志行可以折叠
                 if (msg.contains("↑")) {
                     msg = msg.substringBefore("↑").trim()
                 }
@@ -740,7 +740,7 @@ object LogManager {
 
         val isEssential = listOf(
             "pool", "key:", "started", "address:", "error", "failed", "blocked",
-            "Пул", "Ключ:", "запущен", "Адрес:", "ошибка", "провалены", "заблокирован"
+            "池", "密钥:", "已启动", "地址:", "错误", "失败", "已封锁"
         ).any { marker -> message.contains(marker, ignoreCase = true) }
 
         return LogEntry(

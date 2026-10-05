@@ -273,12 +273,12 @@ fun ConnectionTab(settingsStore: SettingsStore) {
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             ModeChip(
-                                label = "Пакеты",
+                                label = "数据包",
                                 selected = applyMode == "packages",
                                 modifier = Modifier.weight(1f).height(48.dp)
                             ) { applyMode = "packages" }
                             ModeChip(
-                                label = "Ссылка",
+                                label = "链接",
                                 selected = applyMode == "link",
                                 modifier = Modifier.weight(1f).height(48.dp)
                             ) { applyMode = "link" }
@@ -471,7 +471,7 @@ private fun applyToTelegramPackages(context: Context, url: String) {
     }
 
     if (availablePackages.isEmpty()) {
-        Toast.makeText(context, "Клиенты не найдены", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "未找到客户端", Toast.LENGTH_SHORT).show()
         return
     }
 
@@ -488,16 +488,16 @@ private fun applyToTelegramPackages(context: Context, url: String) {
         try {
             context.startActivity(intent)
         } catch (e: Exception) {
-            Toast.makeText(context, "Ошибка при открытии клиента", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "打开客户端时出错", Toast.LENGTH_SHORT).show()
         }
     } else {
-        val chooserIntent = Intent.createChooser(targetedIntents.first(), "Выберите клиент")
+        val chooserIntent = Intent.createChooser(targetedIntents.first(), "选择客户端")
         chooserIntent.putExtra(Intent.EXTRA_INITIAL_INTENTS, targetedIntents.drop(1).toTypedArray())
         chooserIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         try {
             context.startActivity(chooserIntent)
         } catch (e: Exception) {
-            Toast.makeText(context, "Ошибка при выборе клиента", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "选择客户端时出错", Toast.LENGTH_SHORT).show()
         }
     }
 }

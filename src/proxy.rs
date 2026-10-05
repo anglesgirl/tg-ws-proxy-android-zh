@@ -987,10 +987,10 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
     std_init[0..4].copy_from_slice(&[0xEFu8, 0xEF, 0xEF, 0xEF]);
     rand::thread_rng().fill_bytes(&mut std_init[4..8]);
     rand::thread_rng().fill_bytes(&mut std_init[8..56]); // key[8..40] + iv[40..56]
-    let empty_secret: &[u8] = &[];
+    // 派生与入站客户端 hello 一致（界面 secret，默认 0000...0000）——MTProxy 服务器同派生解密
     let mut hash_std = Sha256::new();
     hash_std.update(&std_init[8..40]);
-    hash_std.update(empty_secret);
+    hash_std.update(&secret_bytes);
     let std_tail_key = hash_std.finalize();
     let mut std_tail_enc = new_aes_ctr(&std_tail_key, &std_init[40..56]);
     let mut std_tail = [0u8; 8];
@@ -1002,7 +1002,7 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
     // 出站/下链加解密器：空 secret 派生（对称，服务器端同派生解密）
     let mut hash_std2 = Sha256::new();
     hash_std2.update(&std_init[8..40]);
-    hash_std2.update(empty_secret);
+    hash_std2.update(&secret_bytes);
     let std_tg_key = hash_std2.finalize();
     let std_tg_encryptor = new_aes_ctr(&std_tg_key, &std_init[40..56]);
     let std_tg_decryptor = new_aes_ctr(&std_tg_key, &std_init[40..56]);

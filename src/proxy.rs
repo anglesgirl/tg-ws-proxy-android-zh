@@ -335,6 +335,138 @@ fn http_host_to_ip(host: &str) -> String {
     crate::config::ZWS_DEFAULT_IP.to_string()
 }
 
+/// 双向透传 + 上行 TLS 分片（纯隧道模式共用）
+async fn tunnel_split(mut conn: TcpStream, mut up: TcpStream) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let _ = up.set_nodelay(true);
+    let (cr, cw) = tokio::io::split(conn);
+    let (ur, uw) = tokio::io::split(up);
+    let up_task = tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(cr);
+        let mut w = uw;
+        let mut first = true;
+        loop {
+            let mut b = [0u8; 16384];
+            match tokio::time::timeout(Duration::from_secs(120), reader.read(&mut b)).await {
+                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                Ok(Ok(n)) => {
+                    if first {
+                        for c in split_clienthello(&b[..n]) {
+                            if w.write_all(&c).await.is_err() {
+                                return;
+                            }
+                            tokio::time::sleep(Duration::from_millis(2)).await;
+                        }
+                        first = false;
+                    } else if w.write_all(&b[..n]).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    });
+    let down_task = tokio::spawn(async move {
+        let mut r = ur;
+        let mut w = cw;
+        loop {
+            let mut b = [0u8; 16384];
+            match tokio::time::timeout(Duration::from_secs(120), r.read(&mut b)).await {
+                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                Ok(Ok(n)) => {
+                    if w.write_all(&b[..n]).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    });
+    let _ = tokio::join!(up_task, down_task);
+}
+
+/// SOCKS5 纯隧道（TG 手机端支持）：05 握手 → CONNECT → 域名/IP 直连 → 透传+分片
+async fn handle_socks5(mut conn: TcpStream, mut buf: Vec<u8>, cancel_token: CancellationToken) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    async fn read_more(conn: &mut TcpStream, buf: &mut Vec<u8>, need: usize) -> bool {
+        while buf.len() < need {
+            let mut tmp = [0u8; 512];
+            match tokio::time::timeout(Duration::from_secs(10), conn.read(&mut tmp)).await {
+                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => return false,
+                Ok(Ok(n)) => buf.extend_from_slice(&tmp[..n]),
+            }
+        }
+        true
+    }
+    if !read_more(&mut conn, &mut buf, 2).await || buf[0] != 0x05 {
+        return;
+    }
+    let nmethods = buf[1] as usize;
+    if !read_more(&mut conn, &mut buf, 2 + nmethods).await {
+        return;
+    }
+    if conn.write_all(&[0x05, 0x00]).await.is_err() {
+        return;
+    }
+    let mut req = buf[2 + nmethods..].to_vec();
+    if !read_more(&mut conn, &mut req, 4).await || req[0] != 0x05 || req[1] != 0x01 {
+        let _ = conn.write_all(&[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+        return;
+    }
+    let atyp = req[3];
+    let (host, need): (String, usize) = match atyp {
+        0x01 => {
+            if !read_more(&mut conn, &mut req, 10).await { return; }
+            let ip = format!("{}.{}.{}.{}", req[4], req[5], req[6], req[7]);
+            (ip, 10)
+        }
+        0x03 => {
+            let l = req[4] as usize;
+            if !read_more(&mut conn, &mut req, 5 + l + 2).await { return; }
+            let host = String::from_utf8_lossy(&req[5..5 + l]).to_string();
+            (host, 5 + l + 2)
+        }
+        0x04 => {
+            if !read_more(&mut conn, &mut req, 22).await { return; }
+            let mut ip6: Vec<String> = Vec::new();
+            for i in 0..8 {
+                ip6.push(format!("{:x}", ((req[4 + i * 2] as u16) << 8) | req[5 + i * 2] as u16));
+            }
+            (ip6.join(":"), 22)
+        }
+        _ => {
+            let _ = conn.write_all(&[0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+            return;
+        }
+    };
+    let port = ((req[need - 2] as u16) << 8) | req[need - 1] as u16;
+    let ip = if host.parse::<std::net::IpAddr>().is_ok() {
+        host.clone()
+    } else {
+        http_host_to_ip(&host)
+    };
+    linfo!(" SOCKS5 CONNECT {}:{} -> {}（纯隧道+分片）", host, port, ip);
+    let up = match tokio::time::timeout(
+        Duration::from_secs(8),
+        TcpStream::connect(format!("{}:{}", ip, port)),
+    )
+    .await
+    {
+        Ok(Ok(c)) => c,
+        _ => {
+            let _ = conn.write_all(&[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+            return;
+        }
+    };
+    if conn
+        .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+        .await
+        .is_err()
+    {
+        return;
+    }
+    tunnel_split(conn, up).await;
+    let _ = cancel_token;
+}
+
 /// HTTP CONNECT 纯隧道：TG 客户端原生 TLS/MTProto 原样直通，TLS 分片绕 SNI 检测
 async fn handle_http_connect(
     mut conn: TcpStream,
@@ -378,55 +510,10 @@ async fn handle_http_connect(
             return;
         }
     };
-    let _ = up.set_nodelay(true);
     if conn.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await.is_err() {
         return;
     }
-
-    let (cr, cw) = tokio::io::split(conn);
-    let (ur, uw) = tokio::io::split(up);
-    // 客户端 → 服务器：首个包 TLS 分片
-    let up_task = tokio::spawn(async move {
-        let mut reader = tokio::io::BufReader::new(cr);
-        let mut w = uw;
-        let mut first = true;
-        loop {
-            let mut b = [0u8; 16384];
-            match tokio::time::timeout(Duration::from_secs(120), reader.read(&mut b)).await {
-                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
-                Ok(Ok(n)) => {
-                    if first {
-                        for c in split_clienthello(&b[..n]) {
-                            if w.write_all(&c).await.is_err() {
-                                return;
-                            }
-                            tokio::time::sleep(Duration::from_millis(2)).await;
-                        }
-                        first = false;
-                    } else if w.write_all(&b[..n]).await.is_err() {
-                        return;
-                    }
-                }
-            }
-        }
-    });
-    // 服务器 → 客户端：原样
-    let down_task = tokio::spawn(async move {
-        let mut r = ur;
-        let mut w = cw;
-        loop {
-            let mut b = [0u8; 16384];
-            match tokio::time::timeout(Duration::from_secs(120), r.read(&mut b)).await {
-                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
-                Ok(Ok(n)) => {
-                    if w.write_all(&b[..n]).await.is_err() {
-                        return;
-                    }
-                }
-            }
-        }
-    });
-    let _ = tokio::join!(up_task, down_task);
+    tunnel_split(conn, up).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1024,6 +1111,13 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
     match tokio::time::timeout(Duration::from_secs(10), conn.read_exact(&mut first4)).await {
         Ok(Ok(_)) => {}
         _ => return,
+    }
+    if first4[0] == 0x05 {
+        STATS.connections_http_reject.fetch_add(1, Ordering::Relaxed);
+        linfo!(" SOCKS5 传输（纯隧道模式）: {:02x} {:02x} {:02x} {:02x}", first4[0], first4[1], first4[2], first4[3]);
+        let head_buf = first4.to_vec();
+        handle_socks5(conn, head_buf, cancel_token).await;
+        return;
     }
     if &first4 == b"CONN"
         || &first4 == b"POST"

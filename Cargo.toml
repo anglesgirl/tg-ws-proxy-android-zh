@@ -40,3 +40,6 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+# 0304 record version：绕过国内 DPI 对 0301/0303 的 SNI 阻断（Telegram DC 与 Cloudflare 均实测接受）
+[patch.crates-io]
+rustls = { git = "https://github.com/anglesgirl/rustls-0.23-0304", branch = "main" }

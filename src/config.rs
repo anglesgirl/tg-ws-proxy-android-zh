@@ -100,14 +100,17 @@ pub static CFPROXY_ENC: &[&str] = &[
     "xwuwoqbm.com",
 ];
 
-// DC default IPs
+// DC default IPs — 实测可用（0304 record 直连，绕过 DPI SNI 阻断）
+// DC1: 149.154.161.145 实测 kws1-1/zws1-1.web.telegram.org 握手成功
+// DC5: 149.154.170.200 实测 kws5/kws5-1/zws5-1.web.telegram.org 握手成功
+// 界面设置里填写的 IP 优先于本表；IP 更换时直接改界面即可
 pub static DC_DEFAULT_IPS: Lazy<HashMap<i32, &'static str>> = Lazy::new(|| {
     let mut m = HashMap::new();
-    m.insert(1, "149.154.175.50");
+    m.insert(1, "149.154.161.145");
     m.insert(2, "149.154.167.51");
     m.insert(3, "149.154.175.100");
     m.insert(4, "149.154.167.91");
-    m.insert(5, "149.154.171.5");
+    m.insert(5, "149.154.170.200");
     m.insert(203, "91.105.192.100");
     m
 });

@@ -54,9 +54,10 @@ pub fn ws_domains(dc: i32, is_media: bool) -> Vec<String> {
             format!("kws{}.web.telegram.org", effective_dc),
         ]
     } else {
+        // -1 优先：实测 DC1 只有 kws1-1 可握手（kws1 不带 -1 被 RESET）
         vec![
-            format!("kws{}.web.telegram.org", effective_dc),
             format!("kws{}-1.web.telegram.org", effective_dc),
+            format!("kws{}.web.telegram.org", effective_dc),
         ]
     }
 }

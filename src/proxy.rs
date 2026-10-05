@@ -300,6 +300,135 @@ pub fn is_http_transport(data: &[u8]) -> bool {
         || (data.len() >= 7 && &data[..7] == b"OPTIONS")
 }
 
+/// TLS ClientHello 分片（绕过 SNI 检测）：record 前 96 字节 2 字节/片，其余 8 字节/片
+fn split_clienthello(data: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    if data.len() >= 5 && data[0] == 0x16 && data[1] == 0x03 {
+        let rec_len = ((data[3] as usize) << 8) | data[4] as usize;
+        let total = (5 + rec_len).min(data.len());
+        let head = &data[..total];
+        let mut i = 0;
+        while i < head.len() {
+            let n = if i < 96 { 2 } else { 8 };
+            let end = (i + n).min(head.len());
+            out.push(head[i..end].to_vec());
+            i = end;
+        }
+        if total < data.len() {
+            out.push(data[total..].to_vec());
+        }
+    } else {
+        out.push(data.to_vec());
+    }
+    out
+}
+
+/// 域名 → 直连 IP（同大佬方案 hosts 规则）
+fn http_host_to_ip(host: &str) -> String {
+    let h = host.trim_start_matches('*').trim().trim_end_matches('.').to_lowercase();
+    if h.ends_with("web.telegram.org") || h.starts_with("zws") || h.starts_with("kws") {
+        return "149.154.170.200".to_string();
+    }
+    if h.ends_with("telegram.org") || h.ends_with(".t.me") || h == "t.me" {
+        return "149.154.161.145".to_string();
+    }
+    crate::config::ZWS_DEFAULT_IP.to_string()
+}
+
+/// HTTP CONNECT 纯隧道：TG 客户端原生 TLS/MTProto 原样直通，TLS 分片绕 SNI 检测
+async fn handle_http_connect(
+    mut conn: TcpStream,
+    head_buf: &mut Vec<u8>,
+    cancel_token: CancellationToken,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // 读满请求头
+    while !head_buf.windows(4).any(|w| w == b"\r\n\r\n") && head_buf.len() < 8192 {
+        let mut tmp = [0u8; 1024];
+        match tokio::time::timeout(Duration::from_secs(10), conn.read(&mut tmp)).await {
+            Ok(Ok(0)) | Ok(Err(_)) | Err(_) => {
+                let _ = conn.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n").await;
+                return;
+            }
+            Ok(Ok(n)) => head_buf.extend_from_slice(&tmp[..n]),
+        }
+    }
+    let head_str = String::from_utf8_lossy(head_buf);
+    let first_line = head_str.lines().next().unwrap_or("").trim();
+    let parts: Vec<&str> = first_line.split_whitespace().collect();
+    if parts.len() < 3 || parts[0].to_uppercase() != "CONNECT" {
+        let _ = conn.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n").await;
+        return;
+    }
+    let target = parts[1];
+    let (host, port_str) = target.rsplit_once(':').unwrap_or((target, "443"));
+    let port: u16 = port_str.parse().unwrap_or(443);
+    let ip = http_host_to_ip(host);
+    linfo!(" HTTP CONNECT {}:{} -> {}（纯隧道+分片）", host, port, ip);
+
+    let up = match tokio::time::timeout(
+        Duration::from_secs(8),
+        TcpStream::connect(format!("{}:{}", ip, port)),
+    )
+    .await
+    {
+        Ok(Ok(c)) => c,
+        _ => {
+            let _ = conn.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
+            return;
+        }
+    };
+    let _ = up.set_nodelay(true);
+    if conn.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await.is_err() {
+        return;
+    }
+
+    let (cr, cw) = tokio::io::split(conn);
+    let (ur, uw) = tokio::io::split(up);
+    // 客户端 → 服务器：首个包 TLS 分片
+    let up_task = tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(cr);
+        let mut w = uw;
+        let mut first = true;
+        loop {
+            let mut b = [0u8; 16384];
+            match tokio::time::timeout(Duration::from_secs(120), reader.read(&mut b)).await {
+                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                Ok(Ok(n)) => {
+                    if first {
+                        for c in split_clienthello(&b[..n]) {
+                            if w.write_all(&c).await.is_err() {
+                                return;
+                            }
+                            tokio::time::sleep(Duration::from_millis(2)).await;
+                        }
+                        first = false;
+                    } else if w.write_all(&b[..n]).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    });
+    // 服务器 → 客户端：原样
+    let down_task = tokio::spawn(async move {
+        let mut r = ur;
+        let mut w = cw;
+        loop {
+            let mut b = [0u8; 16384];
+            match tokio::time::timeout(Duration::from_secs(120), r.read(&mut b)).await {
+                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                Ok(Ok(n)) => {
+                    if w.write_all(&b[..n]).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    });
+    let _ = tokio::join!(up_task, down_task);
+}
+
 // ---------------------------------------------------------------------------
 // Bridge WS
 // ---------------------------------------------------------------------------
@@ -890,20 +1019,34 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
     let current_secret = PROXY_SECRET.read().clone();
     let secret_bytes = hex::decode(&current_secret).unwrap_or_default();
 
-    // 64 字节握手
-    let mut handshake = [0u8; 64];
-    match tokio::time::timeout(Duration::from_secs(10), conn.read_exact(&mut handshake)).await {
+    // 先读 4 字节判断传输类型：HTTP CONNECT（纯隧道） / MTProxy 握手
+    let mut first4 = [0u8; 4];
+    match tokio::time::timeout(Duration::from_secs(10), conn.read_exact(&mut first4)).await {
         Ok(Ok(_)) => {}
         _ => return,
     }
-
-    if is_http_transport(&handshake) {
+    if &first4 == b"CONN"
+        || &first4 == b"POST"
+        || &first4 == b"GET "
+        || &first4 == b"HEAD"
+        || &first4 == b"OPTI"
+    {
         STATS.connections_http_reject.fetch_add(1, Ordering::Relaxed);
-        let _ = conn
-            .write_all(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
-            .await;
+        linfo!(" HTTP 传输（纯隧道模式）: {:?}", String::from_utf8_lossy(&first4));
+        let mut head_buf = first4.to_vec();
+        handle_http_connect(conn, &mut head_buf, cancel_token).await;
         return;
     }
+
+    // MTProxy：读剩余 60 字节凑满 64
+    let mut rest = [0u8; 60];
+    match tokio::time::timeout(Duration::from_secs(10), conn.read_exact(&mut rest)).await {
+        Ok(Ok(_)) => {}
+        _ => return,
+    }
+    let mut handshake = [0u8; 64];
+    handshake[..4].copy_from_slice(&first4);
+    handshake[4..].copy_from_slice(&rest);
 
     let clt_dec_prekey = &handshake[8..40];
     let clt_dec_iv = &handshake[40..56];

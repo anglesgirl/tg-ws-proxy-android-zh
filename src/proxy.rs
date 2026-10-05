@@ -333,17 +333,16 @@ fn http_host_to_ip(host: &str) -> String {
     if h.ends_with("telegram.org") || h.ends_with(".t.me") || h == "t.me" {
         return "149.154.161.145".to_string();
     }
-    // 用户实测可用的 IP 直通（170.200 ping 通 / 161.145 用户侧 TLS 100+ 次成功）
-    if h == "149.154.170.200" || h == "149.154.161.145" {
+    // 纯 IP 一律直通（用户提供的候选官方 DC IP 原样直连，逐个试存活）
+    if h.parse::<std::net::Ipv4Addr>().is_ok() {
         return h.to_string();
     }
-    // 其他官方 DC 段 → 170.200 兜底（用户 ping 通=未墙，实测原生 MTProto 端点）
+    // 官方 DC 段域名兜底 → 161.145
     if h.starts_with("149.154.")
         || h.starts_with("91.108.")
         || h.starts_with("185.76.151.")
-        || h.parse::<std::net::Ipv4Addr>().is_ok()
     {
-        return "149.154.170.200".to_string();
+        return "149.154.161.145".to_string();
     }
     crate::config::ZWS_DEFAULT_IP.to_string()
 }

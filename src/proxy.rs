@@ -323,13 +323,21 @@ fn split_clienthello(data: &[u8]) -> Vec<Vec<u8>> {
     out
 }
 
-/// 域名 → 直连 IP（同大佬方案 hosts 规则）
+/// 域名/IP → 直连 IP（同大佬方案 hosts 规则）
+/// TG 官方 DC 段（149.154.0.0/16 等）→ 161.145（无 SNI 时是 MTProxy 后端，吃 MTProto 混淆）
 fn http_host_to_ip(host: &str) -> String {
     let h = host.trim_start_matches('*').trim().trim_end_matches('.').to_lowercase();
     if h.ends_with("web.telegram.org") || h.starts_with("zws") || h.starts_with("kws") {
         return "149.154.170.200".to_string();
     }
     if h.ends_with("telegram.org") || h.ends_with(".t.me") || h == "t.me" {
+        return "149.154.161.145".to_string();
+    }
+    if h.starts_with("149.154.")
+        || h.starts_with("91.108.")
+        || h.starts_with("185.76.151.")
+        || h.parse::<std::net::Ipv4Addr>().is_ok()
+    {
         return "149.154.161.145".to_string();
     }
     crate::config::ZWS_DEFAULT_IP.to_string()
@@ -438,11 +446,7 @@ async fn handle_socks5(mut conn: TcpStream, mut buf: Vec<u8>, cancel_token: Canc
         }
     };
     let port = ((req[need - 2] as u16) << 8) | req[need - 1] as u16;
-    let ip = if host.parse::<std::net::IpAddr>().is_ok() {
-        host.clone()
-    } else {
-        http_host_to_ip(&host)
-    };
+    let ip = http_host_to_ip(&host);
     linfo!(" SOCKS5 CONNECT {}:{} -> {}（纯隧道+分片）", host, port, ip);
     let up = match tokio::time::timeout(
         Duration::from_secs(8),

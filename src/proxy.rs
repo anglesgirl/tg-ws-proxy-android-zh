@@ -337,13 +337,13 @@ fn http_host_to_ip(host: &str) -> String {
     if h == "149.154.170.200" || h == "149.154.161.145" {
         return h.to_string();
     }
-    // 其他官方 DC 段 → 161.145 兜底（MTProxy 行为）
+    // 其他官方 DC 段 → 170.200 兜底（用户 ping 通=未墙，实测原生 MTProto 端点）
     if h.starts_with("149.154.")
         || h.starts_with("91.108.")
         || h.starts_with("185.76.151.")
         || h.parse::<std::net::Ipv4Addr>().is_ok()
     {
-        return "149.154.161.145".to_string();
+        return "149.154.170.200".to_string();
     }
     crate::config::ZWS_DEFAULT_IP.to_string()
 }

@@ -21,6 +21,7 @@ pub const BRIDGE_READ_TIMEOUT: Duration = Duration::from_secs(120);
 pub const BRIDGE_PING_INTERVAL: Duration = Duration::from_secs(30);
 pub const WS_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 pub const WS_CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
+pub const WS_READ_TIMEOUT: Duration = Duration::from_secs(30);
 pub const WS_BRIDGE_CHUNK_SIZE: usize = 64 * 1024;
 pub const POOLED_FRAME_CAP: usize = WS_BRIDGE_CHUNK_SIZE + 32;
 

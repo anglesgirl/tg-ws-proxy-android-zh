@@ -1139,6 +1139,22 @@ pub async fn connect_direct_ws(
     let mut ws_failed_redirect = false;
     let mut all_redirects = true;
 
+    // v1.4：裸 TLS 隧道优先（MTProxy over TLS 直连 zws1-1，不发 WS 升级）。
+    // 用户网络实测：DC5 段 IP（170.200）TLS 握手被 DPI 拦，161.145 稳定可握手；
+    // zws 网关按内层 MTProto dc_id 路由到任意 DC（含 DC5）。
+    let tunnel_timeout = if timeout > 0.0 { timeout } else { 10.0 };
+    let mut tunnel_ips: Vec<String> = Vec::new();
+    if !target.is_empty() {
+        tunnel_ips.push(target.to_string());
+    }
+    tunnel_ips.push(crate::config::ZWS_DEFAULT_IP.to_string());
+    for tip in tunnel_ips {
+        match crate::ws::tls_tunnel_once(&tip, "zws1-1.web.telegram.org", Duration::from_secs_f64(tunnel_timeout)).await {
+            Ok(ws) => return (Some(ws), false, false),
+            Err(_) => {}
+        }
+    }
+
     for dom in domains {
         match ws_connect(target, dom, "/apiws", timeout).await {
             Ok(ws) => return (Some(ws), ws_failed_redirect, false),

@@ -171,6 +171,8 @@ pub struct RawWebSocket {
     reader: tokio::sync::Mutex<BufReader<tokio::io::ReadHalf<TlsStream<TcpStream>>>>,
     writer: tokio::sync::Mutex<tokio::io::WriteHalf<TlsStream<TcpStream>>>,
     pub closed: AtomicBool,
+    /// true = 裸 TLS 隧道（MTProxy over TLS 直连，不做 WS 帧封装）
+    raw_mode: bool,
 }
 
 impl RawWebSocket {
@@ -182,6 +184,20 @@ impl RawWebSocket {
         if self.is_closed() {
             return Err(WsError::Other("WebSocket closed".to_string()));
         }
+        if self.raw_mode {
+            let mut writer = self.writer.lock().await;
+            return match tokio::time::timeout(WS_WRITE_TIMEOUT, writer.write_all(data)).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => {
+                    self.closed.store(true, Ordering::Relaxed);
+                    Err(WsError::Io(e))
+                }
+                Err(_) => {
+                    self.closed.store(true, Ordering::Relaxed);
+                    Err(WsError::Timeout)
+                }
+            };
+        }
         let frame = build_frame(OP_BINARY, data, true);
         self.write_frame(&frame, WS_WRITE_TIMEOUT).await
     }
@@ -192,8 +208,12 @@ impl RawWebSocket {
         }
         let mut writer = self.writer.lock().await;
         for part in parts {
-            let frame = build_frame(OP_BINARY, part, true);
-            match tokio::time::timeout(WS_WRITE_TIMEOUT, writer.write_all(&frame)).await {
+            let data = if self.raw_mode {
+                part.clone()
+            } else {
+                build_frame(OP_BINARY, part, true)
+            };
+            match tokio::time::timeout(WS_WRITE_TIMEOUT, writer.write_all(&data)).await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
                     self.closed.store(true, Ordering::Relaxed);
@@ -211,6 +231,9 @@ impl RawWebSocket {
     pub async fn send_ping(&self) -> Result<(), WsError> {
         if self.is_closed() {
             return Err(WsError::Other("WebSocket closed".to_string()));
+        }
+        if self.raw_mode {
+            return Ok(()); // 裸隧道无 ping 帧
         }
         let frame = build_frame(OP_PING, &[], true);
         self.write_frame(&frame, WS_CONTROL_TIMEOUT).await
@@ -238,6 +261,27 @@ impl RawWebSocket {
 
     // Recv 处理控制帧（同 Go Recv）
     pub async fn recv(&self) -> Result<Vec<u8>, WsError> {
+        if self.raw_mode {
+            let mut buf = vec![0u8; 65536];
+            let mut reader = self.reader.lock().await;
+            let n = match tokio::time::timeout(WS_READ_TIMEOUT, reader.read(&mut buf)).await {
+                Ok(Ok(n)) => n,
+                Ok(Err(e)) => {
+                    self.closed.store(true, Ordering::Relaxed);
+                    return Err(WsError::Io(e));
+                }
+                Err(_) => return Err(WsError::Timeout),
+            };
+            if n == 0 {
+                self.closed.store(true, Ordering::Relaxed);
+                return Err(WsError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "EOF",
+                )));
+            }
+            buf.truncate(n);
+            return Ok(buf);
+        }
         while !self.is_closed() {
             let (opcode, payload) = match self.read_frame().await {
                 Ok(v) => v,
@@ -280,6 +324,9 @@ impl RawWebSocket {
         if self.closed.swap(true, Ordering::Relaxed) {
             return;
         }
+        if self.raw_mode {
+            return; // 裸隧道直接标记关闭，无 CLOSE 帧
+        }
         let frame = build_frame(OP_CLOSE, &[], true);
         let _ = self.write_frame(&frame, WS_CONTROL_TIMEOUT).await;
         // Skipping writer.shutdown().await to avoid hanging on dead connections
@@ -290,6 +337,33 @@ impl RawWebSocket {
     // 避免在 read_exact 中途丢弃 future（否则
     // 已读入 BufReader 的字节会丢失 → 流不同步）。
     pub async fn recv_with_timeout(&self, dur: Duration) -> Result<Vec<u8>, WsError> {
+        if self.raw_mode {
+            if self.is_closed() {
+                return Err(WsError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "EOF",
+                )));
+            }
+            let mut buf = vec![0u8; 65536];
+            let mut reader = self.reader.lock().await;
+            let n = match tokio::time::timeout(dur, reader.read(&mut buf)).await {
+                Ok(Ok(n)) => n,
+                Ok(Err(e)) => {
+                    self.closed.store(true, Ordering::Relaxed);
+                    return Err(WsError::Io(e));
+                }
+                Err(_) => return Err(WsError::Timeout),
+            };
+            if n == 0 {
+                self.closed.store(true, Ordering::Relaxed);
+                return Err(WsError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "EOF",
+                )));
+            }
+            buf.truncate(n);
+            return Ok(buf);
+        }
         loop {
             if self.is_closed() {
                 return Err(WsError::Io(std::io::Error::new(
@@ -520,6 +594,60 @@ fn server_name(domain: &str) -> ServerName<'static> {
         .unwrap_or_else(|_| ServerName::IpAddress("127.0.0.1".parse::<IpAddr>().unwrap().into()))
 }
 
+/// TCP 直连 + TLS 握手（record 版本已由 rustls fork 改写为 0304）
+async fn tls_connect(
+    dial_addr: &str,
+    domain: &str,
+    timeout: Duration,
+) -> Result<TlsStream<TcpStream>, WsError> {
+    let target_addr = format!("{}:443", dial_addr);
+    let raw_conn = match tokio::time::timeout(timeout, TcpStream::connect(&target_addr)).await {
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => return Err(WsError::Io(e)),
+        Err(_) => return Err(WsError::Timeout),
+    };
+    set_sock_opts(&raw_conn);
+
+    let connector = TlsConnector::from(TLS_CONFIG.clone());
+    let sni = server_name(domain);
+    let handshake_timeout = ws_handshake_timeout(timeout);
+    match tokio::time::timeout(handshake_timeout, connector.connect(sni, raw_conn)).await {
+        Ok(Ok(c)) => Ok(c),
+        Ok(Err(e)) => {
+            if e.kind() != std::io::ErrorKind::ConnectionReset {
+                ldebug!(" ws tls fail {} via {}: {}", domain, dial_addr, e);
+            }
+            Err(WsError::Io(e))
+        }
+        Err(_) => {
+            ldebug!(" ws tls fail {} via {}: timeout", domain, dial_addr);
+            Err(WsError::Timeout)
+        }
+    }
+}
+
+/// 裸 TLS 隧道（MTProxy over TLS 直连）：不发 WS 升级请求，
+/// TLS 握手后直接透传字节。对应「转发器直连 zws 节点」方案。
+pub async fn tls_tunnel_once(
+    dial_addr: &str,
+    domain: &str,
+    timeout: Duration,
+) -> Result<RawWebSocket, WsError> {
+    if dial_addr.is_empty() {
+        return Err(WsError::Other("empty dial address".to_string()));
+    }
+    let tls_conn = tls_connect(dial_addr, domain, timeout).await?;
+    linfo!(" TLS 隧道 ok via {} SNI={} record=0304", dial_addr, domain);
+    let (read_half, write_half) = tokio::io::split(tls_conn);
+    let bufreader = BufReader::with_capacity(4096, read_half);
+    Ok(RawWebSocket {
+        reader: tokio::sync::Mutex::new(bufreader),
+        writer: tokio::sync::Mutex::new(write_half),
+        closed: AtomicBool::new(false),
+        raw_mode: true,
+    })
+}
+
 // wsConnectOnce — 请求头与 Python raw_websocket.py 完全一致（不带 User-Agent）。
 pub async fn ws_connect_once(
     dial_addr: &str,
@@ -530,34 +658,7 @@ pub async fn ws_connect_once(
     if dial_addr.is_empty() {
         return Err(WsError::Other("empty dial address".to_string()));
     }
-
-    let target_addr = format!("{}:443", dial_addr);
-
-    let raw_conn = match tokio::time::timeout(timeout, TcpStream::connect(&target_addr)).await {
-        Ok(Ok(c)) => c,
-        Ok(Err(e)) => return Err(WsError::Io(e)),
-        Err(_) => return Err(WsError::Timeout),
-    };
-    set_sock_opts(&raw_conn);
-
-    let connector = TlsConnector::from(TLS_CONFIG.clone());
-    let sni = server_name(domain);
-
-    let handshake_timeout = ws_handshake_timeout(timeout);
-    let tls_conn =
-        match tokio::time::timeout(handshake_timeout, connector.connect(sni, raw_conn)).await {
-            Ok(Ok(c)) => c,
-            Ok(Err(e)) => {
-                if e.kind() != std::io::ErrorKind::ConnectionReset {
-                    ldebug!(" ws tls fail {} via {}: {}", domain, dial_addr, e);
-                }
-                return Err(WsError::Io(e));
-            }
-            Err(_) => {
-                ldebug!(" ws tls fail {} via {}: timeout", domain, dial_addr);
-                return Err(WsError::Timeout);
-            }
-        };
+    let tls_conn = tls_connect(dial_addr, domain, timeout).await?;
     linfo!(" WS TLS ok via {} SNI={} record=0304", dial_addr, domain);
 
     let (read_half, mut write_half) = tokio::io::split(tls_conn);
@@ -631,6 +732,7 @@ pub async fn ws_connect_once(
             reader: tokio::sync::Mutex::new(bufreader),
             writer: tokio::sync::Mutex::new(write_half),
             closed: AtomicBool::new(false),
+            raw_mode: false,
         });
     }
 

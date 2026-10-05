@@ -980,6 +980,33 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
         relay_init[56 + i] = tail_plain[i] ^ keystream_tail[i];
     }
 
+    // —— 标准 MTProxy hello（裸隧道/直连 MTProxy 服务器用）——
+    // 服务器只认 0xEF magic + SHA256(key+secret) 派生；公共 MTProxy 无 secret → 空派生。
+    // tg-ws-proxy 的 kws 私有 relay_init（随机 magic + 直接 key/iv）发标准服务器会被 400 拒。
+    let mut std_init = [0u8; 64];
+    std_init[0..4].copy_from_slice(&[0xEFu8, 0xEF, 0xEF, 0xEF]);
+    rand::thread_rng().fill_bytes(&mut std_init[4..8]);
+    rand::thread_rng().fill_bytes(&mut std_init[8..56]); // key[8..40] + iv[40..56]
+    let empty_secret: &[u8] = &[];
+    let mut hash_std = Sha256::new();
+    hash_std.update(&std_init[8..40]);
+    hash_std.update(empty_secret);
+    let std_tail_key = hash_std.finalize();
+    let mut std_tail_enc = new_aes_ctr(&std_tail_key, &std_init[40..56]);
+    let mut std_tail = [0u8; 8];
+    std_tail[0..4].copy_from_slice(proto_tag);
+    std_tail[4..6].copy_from_slice(&dc_bytes);
+    rand::thread_rng().fill_bytes(&mut std_tail[6..8]);
+    std_tail_enc.xor(&mut std_tail);
+    std_init[56..64].copy_from_slice(&std_tail);
+    // 出站/下链加解密器：空 secret 派生（对称，服务器端同派生解密）
+    let mut hash_std2 = Sha256::new();
+    hash_std2.update(&std_init[8..40]);
+    hash_std2.update(empty_secret);
+    let std_tg_key = hash_std2.finalize();
+    let std_tg_encryptor = new_aes_ctr(&std_tg_key, &std_init[40..56]);
+    let std_tg_decryptor = new_aes_ctr(&std_tg_key, &std_init[40..56]);
+
     let dc_key = (dc, is_media_int(is_media));
     let now = now_unix_f64();
 
@@ -1060,10 +1087,10 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
 
     // send direct init
     let mut ws = ws_opt.take().unwrap();
-    // 裸隧道：原样透传客户端 hello（zws 是标准 MTProxy 服务，只认客户端 0xEF hello，
-    // 不认 tg-ws-proxy 的自建 relay_init——后者是 kws 端点私有握手）
+    // 裸隧道：发标准 MTProxy hello（0xEF + 空 secret 派生）；
+    // WS 路径：发 kws 私有 relay_init
     let init_payload: Vec<u8> = if ws.is_raw_mode() {
-        handshake.to_vec()
+        std_init.to_vec()
     } else {
         relay_init.to_vec()
     };
@@ -1105,7 +1132,7 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
             }
             Some(rws) => {
                 let retry_payload: Vec<u8> = if rws.is_raw_mode() {
-                    handshake.to_vec()
+                    std_init.to_vec()
                 } else {
                     relay_init.to_vec()
                 };
@@ -1141,7 +1168,11 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
     let _ = &pool;
     STATS.connections_ws.fetch_add(1, Ordering::Relaxed);
 
-    let is_raw = ws.is_raw_mode(); // 裸隧道 = 纯字节透传（不加解密）
+    let is_raw = ws.is_raw_mode();
+    // 裸隧道：标准 hello + 空 secret 派生加解密，无 kws 分帧
+    let used_splitter = if is_raw { None } else { splitter };
+    let used_tg_enc = if is_raw { std_tg_encryptor } else { tg_encryptor };
+    let used_tg_dec = if is_raw { std_tg_decryptor } else { tg_decryptor };
     bridge_ws(
         conn,
         ws,
@@ -1150,13 +1181,13 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
         target,
         443,
         is_media,
-        splitter,
+        used_splitter,
         clt_decryptor,
         clt_encryptor,
-        tg_encryptor,
-        tg_decryptor,
+        used_tg_enc,
+        used_tg_dec,
         cancel_token,
-        is_raw,
+        false,
     )
     .await;
 }

@@ -468,6 +468,12 @@ async fn handle_socks5(mut conn: TcpStream, mut buf: Vec<u8>, cancel_token: Canc
         }
     };
     let port = ((req[need - 2] as u16) << 8) | req[need - 1] as u16;
+    // TG 官方 DC 子网 → WSS 隧道（kws{dc}.web.telegram.org，伪装 HTTPS 到 web.telegram.org）
+    if let Some(dc) = telegram_dc_from_ip(&host) {
+        linfo!(" SOCKS5 CONNECT {}:{} -> WSS 隧道 (dc={})", host, port, dc);
+        handle_tg_wss(conn, dc, cancel_token).await;
+        return;
+    }
     let ip = http_host_to_ip(&host);
     linfo!(" SOCKS5 CONNECT {}:{} -> {}（纯隧道+分片）", host, port, ip);
     let up = match tokio::time::timeout(
@@ -490,6 +496,148 @@ async fn handle_socks5(mut conn: TcpStream, mut buf: Vec<u8>, cancel_token: Canc
         return;
     }
     tunnel_split(conn, up).await;
+    let _ = cancel_token;
+}
+
+/// TG 官方 DC 子网 → DC 编号（TGLock/Habr 文档映射）
+fn telegram_dc_from_ip(ip: &str) -> Option<i32> {
+    let o: Vec<u8> = ip.split('.').filter_map(|p| p.parse().ok()).collect();
+    if o.len() != 4 {
+        return None;
+    }
+    match (o[0], o[1]) {
+        (149, 154) => Some(match o[2] {
+            160..=163 => 1,
+            164..=167 => 2,
+            168..=171 => 3,
+            172..=175 => 1,
+            _ => 2,
+        }),
+        (91, 108) => Some(match o[2] {
+            56..=59 => 5,
+            8..=11 => 3,
+            12..=15 => 4,
+            _ => 2,
+        }),
+        (91, 105) => Some(2),
+        (185, 76) => Some(2),
+        _ => None,
+    }
+}
+
+/// 各 DC 的官方 WSS 虚拟主机 IP（TGLock 硬编码表）
+fn tg_dc_ips(dc: i32) -> Vec<&'static str> {
+    match dc {
+        1 => vec!["149.154.175.50"],
+        2 => vec!["149.154.167.51", "149.154.167.220"],
+        3 => vec!["149.154.175.100"],
+        4 => vec!["149.154.167.91", "149.154.167.220"],
+        5 => vec!["149.154.171.5"],
+        _ => vec![],
+    }
+}
+
+/// WSS 双向字节 relay（TCP ↔ WS binary frame，纯透传零解析）
+async fn relay_ws(mut conn: TcpStream, ws: std::sync::Arc<crate::ws::RawWebSocket>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (cr, cw) = tokio::io::split(conn);
+    let ws_up = ws.clone();
+    let up_task = tokio::spawn(async move {
+        let mut buf = [0u8; 16384];
+        let mut pkts: u64 = 0;
+        let mut bytes: u64 = 0;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(180), cr.read(&mut buf)).await {
+                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                Ok(Ok(n)) => {
+                    pkts += 1;
+                    bytes += n as u64;
+                    if pkts % 128 == 0 {
+                        linfo!(" WSS 上行: {} 包 {} 字节", pkts, bytes);
+                    }
+                    if ws_up.send(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        linfo!(" WSS 上行结束: {} 包 {} 字节", pkts, bytes);
+    });
+    let ws_down = ws.clone();
+    let down_task = tokio::spawn(async move {
+        let mut out = cw;
+        let mut pkts: u64 = 0;
+        let mut bytes: u64 = 0;
+        loop {
+            match ws_down.recv().await {
+                Ok(data) => {
+                    pkts += 1;
+                    bytes += data.len() as u64;
+                    if pkts % 128 == 0 {
+                        linfo!(" WSS 下行: {} 包 {} 字节", pkts, bytes);
+                    }
+                    if out.write_all(&data).await.is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        linfo!(" WSS 下行结束: {} 包 {} 字节", pkts, bytes);
+    });
+    let _ = tokio::join!(up_task, down_task);
+    ws.close().await;
+}
+
+/// WSS 隧道：路由级联（直连 DC IP → 系统 DNS 解析 kws 域名）→ 纯字节 relay
+async fn handle_tg_wss(mut conn: TcpStream, dc: i32, cancel_token: CancellationToken) {
+    use tokio::io::AsyncWriteExt;
+    let host = format!("kws{}.web.telegram.org", dc);
+    let mut ws: Option<std::sync::Arc<crate::ws::RawWebSocket>> = None;
+    // 路由 1：直连 DC IP + SNI=kws{dc}
+    for ip in tg_dc_ips(dc) {
+        match crate::ws::ws_connect_once(ip, &host, "/apiws", Duration::from_secs(8)).await {
+            Ok(w) => {
+                linfo!(" WSS 路由1 ok: {} SNI={} record=0304", ip, host);
+                ws = Some(std::sync::Arc::new(w));
+                break;
+            }
+            Err(_) => linfo!(" WSS 路由1 失败: {}", ip),
+        }
+    }
+    // 路由 2：系统 DNS 解析 kws{dc} 域名
+    if ws.is_none() {
+        if let Ok(ips) = tokio::net::lookup_host(format!("{}:443", host)).await {
+            for addr in ips {
+                let ip = addr.ip().to_string();
+                match crate::ws::ws_connect_once(&ip, &host, "/apiws", Duration::from_secs(8)).await {
+                    Ok(w) => {
+                        linfo!(" WSS 路由2 ok: {} SNI={} record=0304", ip, host);
+                        ws = Some(std::sync::Arc::new(w));
+                        break;
+                    }
+                    Err(_) => linfo!(" WSS 路由2 失败: {}", ip),
+                }
+            }
+        }
+    }
+    let Some(ws) = ws else {
+        linfo!(" WSS 全部路由失败 (dc={}, {})", dc, host);
+        let _ = conn.write_all(&[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+        let _ = cancel_token;
+        return;
+    };
+    if conn
+        .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+        .await
+        .is_err()
+    {
+        let _ = cancel_token;
+        return;
+    }
+    linfo!(" WSS 隧道建立: {} (dc={})", host, dc);
+    relay_ws(conn, ws).await;
+    linfo!(" WSS 隧道关闭 (dc={})", dc);
     let _ = cancel_token;
 }
 

@@ -343,21 +343,29 @@ fn http_host_to_ip(host: &str) -> String {
     crate::config::ZWS_DEFAULT_IP.to_string()
 }
 
-/// 双向透传 + 上行 TLS 分片（纯隧道模式共用）
+/// 双向透传 + 上行 TLS 分片（纯隧道模式共用），带数据计数日志
 async fn tunnel_split(mut conn: TcpStream, mut up: TcpStream) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let _ = up.set_nodelay(true);
+    linfo!(" 隧道已建立（双向透传+分片）");
     let (cr, cw) = tokio::io::split(conn);
     let (ur, uw) = tokio::io::split(up);
     let up_task = tokio::spawn(async move {
         let mut reader = tokio::io::BufReader::new(cr);
         let mut w = uw;
         let mut first = true;
+        let mut pkts: u64 = 0;
+        let mut bytes: u64 = 0;
         loop {
             let mut b = [0u8; 16384];
             match tokio::time::timeout(Duration::from_secs(120), reader.read(&mut b)).await {
                 Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
                 Ok(Ok(n)) => {
+                    pkts += 1;
+                    bytes += n as u64;
+                    if pkts % 128 == 0 {
+                        linfo!(" 隧道上行: {} 包 {} 字节", pkts, bytes);
+                    }
                     if first {
                         for c in split_clienthello(&b[..n]) {
                             if w.write_all(&c).await.is_err() {
@@ -372,23 +380,33 @@ async fn tunnel_split(mut conn: TcpStream, mut up: TcpStream) {
                 }
             }
         }
+        linfo!(" 隧道上行结束: {} 包 {} 字节", pkts, bytes);
     });
     let down_task = tokio::spawn(async move {
         let mut r = ur;
         let mut w = cw;
+        let mut pkts: u64 = 0;
+        let mut bytes: u64 = 0;
         loop {
             let mut b = [0u8; 16384];
             match tokio::time::timeout(Duration::from_secs(120), r.read(&mut b)).await {
                 Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
                 Ok(Ok(n)) => {
+                    pkts += 1;
+                    bytes += n as u64;
+                    if pkts % 128 == 0 {
+                        linfo!(" 隧道下行: {} 包 {} 字节", pkts, bytes);
+                    }
                     if w.write_all(&b[..n]).await.is_err() {
                         return;
                     }
                 }
             }
         }
+        linfo!(" 隧道下行结束: {} 包 {} 字节", pkts, bytes);
     });
     let _ = tokio::join!(up_task, down_task);
+    linfo!(" 隧道关闭");
 }
 
 /// SOCKS5 纯隧道（TG 手机端支持）：05 握手 → CONNECT → 域名/IP 直连 → 透传+分片

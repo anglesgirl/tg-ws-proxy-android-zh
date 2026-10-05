@@ -1,6 +1,6 @@
 use crate::config::*;
 use crate::crypto::xor_mask_in_place;
-use crate::{ldebug};
+use crate::{ldebug, linfo};
 use base64::Engine;
 use byteorder::{BigEndian, ByteOrder};
 use rand::RngCore;
@@ -558,6 +558,7 @@ pub async fn ws_connect_once(
                 return Err(WsError::Timeout);
             }
         };
+    linfo!(" WS TLS ok via {} SNI={} record=0304", dial_addr, domain);
 
     let (read_half, mut write_half) = tokio::io::split(tls_conn);
 

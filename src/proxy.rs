@@ -1214,7 +1214,7 @@ pub async fn connect_direct_ws(
     }
     tunnel_ips.push(crate::config::ZWS_DEFAULT_IP.to_string());
     for tip in tunnel_ips {
-        match crate::ws::tls_tunnel_once(&tip, "zws1-1.web.telegram.org", Duration::from_secs_f64(tunnel_timeout)).await {
+        match crate::ws::tls_tunnel_once(&tip, &tip, Duration::from_secs_f64(tunnel_timeout)).await {
             Ok(ws) => return (Some(ws), false, false),
             Err(_) => {}
         }

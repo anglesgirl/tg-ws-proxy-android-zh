@@ -1008,20 +1008,14 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
     let std_tail_key = hash_std.finalize();
     let mut std_tail_enc = new_aes_ctr(&std_tail_key, &std_init[40..56]);
     let mut std_tail = [0u8; 8];
-    std_tail[0..4].copy_from_slice(proto_tag);
+    std_tail[0..4].copy_from_slice(&[0xEFu8, 0xEF, 0xEF, 0xEF]); // 标准校验 magic（服务器解密后校验）
     std_tail[4..6].copy_from_slice(&dc_bytes);
     rand::thread_rng().fill_bytes(&mut std_tail[6..8]);
     std_tail_enc.xor(&mut std_tail);
     std_init[56..64].copy_from_slice(&std_tail);
-    // 官方 MTProxy obfuscated2 密钥派生：
-    //   上行(客户端→服务器): encKey = SHA256(key + secret)，iv = 原始 iv
-    //   下行(服务器→客户端): rev48 = 反转(key+iv)，decKey = SHA256(rev48 + secret)，iv = rev48[32..48]
-    let mut hash_std2 = Sha256::new();
-    hash_std2.update(&std_init[8..40]);
-    hash_std2.update(&secret_bytes);
-    let std_tg_key = hash_std2.finalize();
-    let std_tg_encryptor = new_aes_ctr(&std_tg_key, &std_init[40..56]);
-
+    // 上行加密器 = tail 加密器本身（AES-CTR 连续流：tail 已消耗前 8 字节，数据从偏移 8 继续）
+    let std_tg_encryptor = std_tail_enc.clone_state();
+    // 下行解密器：官方 obfuscated2 反转派生（rev48 = 反转(key+iv)，decKey = SHA256(rev48 + secret)，iv = rev48[32..48]）
     let mut rev48 = [0u8; 48];
     for i in 0..48 {
         rev48[i] = std_init[8 + 47 - i];
@@ -1033,7 +1027,7 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
     let std_tg_decryptor = new_aes_ctr(&std_tg_dec_key, &rev48[32..48]);
     linfo!(
         " std hello 派生: up={}..{}.. down={}..{}.. rev48={}..{}..",
-        hex::encode(&std_tg_key[..4]),
+        hex::encode(&std_tail_key[..4]),
         hex::encode(&std_init[40..44]),
         hex::encode(&std_tg_dec_key[..4]),
         hex::encode(&rev48[32..36]),

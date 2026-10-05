@@ -358,6 +358,8 @@ pub async fn bridge_ws(
     let cancel_token_up = cancel_token.clone();
     let up_task = tokio::spawn(async move {
         let mut buf = vec![0u8; WS_BRIDGE_CHUNK_SIZE];
+        let mut up_cnt: u64 = 0;
+        let mut up_bytes: u64 = 0;
         loop {
             let read_res = tokio::select! {
                 _ = cancel_token_up.cancelled() => break,
@@ -421,6 +423,11 @@ pub async fn bridge_ws(
             if send_err {
                 break;
             }
+            up_cnt += 1;
+            up_bytes += n as u64;
+            if up_cnt % 64 == 0 {
+                linfo!(" 上行包={} 字节={}KB", up_cnt, up_bytes / 1024);
+            }
         }
         cancel_up.notify_waiters();
     });
@@ -431,6 +438,8 @@ pub async fn bridge_ws(
     let cancel_down = cancel.clone();
     let cancel_token_down = cancel_token.clone();
     let down_task = tokio::spawn(async move {
+        let mut dn_cnt: u64 = 0;
+        let mut dn_bytes: u64 = 0;
         loop {
             let recv_res = tokio::select! {
                 _ = cancel_token_down.cancelled() => break,
@@ -457,6 +466,11 @@ pub async fn bridge_ws(
             clt_enc.xor(&mut data);
             if conn_write.write_all(&data).await.is_err() {
                 break;
+            }
+            dn_cnt += 1;
+            dn_bytes += n as u64;
+            if dn_cnt % 64 == 0 {
+                linfo!(" 下行包={} 字节={}KB", dn_cnt, dn_bytes / 1024);
             }
         }
         cancel_down.notify_waiters();
@@ -999,13 +1013,33 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
     rand::thread_rng().fill_bytes(&mut std_tail[6..8]);
     std_tail_enc.xor(&mut std_tail);
     std_init[56..64].copy_from_slice(&std_tail);
-    // 出站/下链加解密器：空 secret 派生（对称，服务器端同派生解密）
+    // 官方 MTProxy obfuscated2 密钥派生：
+    //   上行(客户端→服务器): encKey = SHA256(key + secret)，iv = 原始 iv
+    //   下行(服务器→客户端): rev48 = 反转(key+iv)，decKey = SHA256(rev48 + secret)，iv = rev48[32..48]
     let mut hash_std2 = Sha256::new();
     hash_std2.update(&std_init[8..40]);
     hash_std2.update(&secret_bytes);
     let std_tg_key = hash_std2.finalize();
     let std_tg_encryptor = new_aes_ctr(&std_tg_key, &std_init[40..56]);
-    let std_tg_decryptor = new_aes_ctr(&std_tg_key, &std_init[40..56]);
+
+    let mut rev48 = [0u8; 48];
+    for i in 0..48 {
+        rev48[i] = std_init[8 + 47 - i];
+    }
+    let mut hash_std3 = Sha256::new();
+    hash_std3.update(&rev48);
+    hash_std3.update(&secret_bytes);
+    let std_tg_dec_key = hash_std3.finalize();
+    let std_tg_decryptor = new_aes_ctr(&std_tg_dec_key, &rev48[32..48]);
+    linfo!(
+        " std hello 派生: up={}..{}.. down={}..{}.. rev48={}..{}..",
+        hex::encode(&std_tg_key[..4]),
+        hex::encode(&std_init[40..44]),
+        hex::encode(&std_tg_dec_key[..4]),
+        hex::encode(&rev48[32..36]),
+        hex::encode(&rev48[..4]),
+        hex::encode(&rev48[44..48])
+    );
 
     let dc_key = (dc, is_media_int(is_media));
     let now = now_unix_f64();

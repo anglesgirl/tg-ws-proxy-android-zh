@@ -180,6 +180,10 @@ impl RawWebSocket {
         self.closed.load(Ordering::Relaxed)
     }
 
+    pub fn is_raw_mode(&self) -> bool {
+        self.raw_mode
+    }
+
     pub async fn send(&self, data: &[u8]) -> Result<(), WsError> {
         if self.is_closed() {
             return Err(WsError::Other("WebSocket closed".to_string()));

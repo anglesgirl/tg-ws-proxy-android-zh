@@ -318,6 +318,7 @@ pub async fn bridge_ws(
     mut tg_enc: TrackedStream,
     mut tg_dec: TrackedStream,
     cancel_token: CancellationToken,
+    raw: bool,
 ) {
     let ws = Arc::new(ws);
     let last_activity = Arc::new(Mutex::new(std::time::Instant::now()));
@@ -365,17 +366,19 @@ pub async fn bridge_ws(
             };
             let n = match read_res {
                 Ok(Ok(0)) => {
-                    // EOF: flush splitter tail
-                    if let Some(sp) = splitter.as_mut() {
-                        let tail = sp.flush();
-                        if !tail.is_empty() {
-                            let r = if tail.len() > 1 {
-                                ws_up.send_batch(&tail).await
-                            } else {
-                                ws_up.send(&tail[0]).await
-                            };
-                            if r.is_err() {
-                                break;
+                    // EOF: flush splitter tail（裸隧道无 splitter，直接断开）
+                    if !raw {
+                        if let Some(sp) = splitter.as_mut() {
+                            let tail = sp.flush();
+                            if !tail.is_empty() {
+                                let r = if tail.len() > 1 {
+                                    ws_up.send_batch(&tail).await
+                                } else {
+                                    ws_up.send(&tail[0]).await
+                                };
+                                if r.is_err() {
+                                    break;
+                                }
                             }
                         }
                     }
@@ -389,6 +392,14 @@ pub async fn bridge_ws(
             let chunk = &mut buf[..n];
             STATS.bytes_up.fetch_add(n as i64, Ordering::Relaxed);
             *la_up.lock().await = std::time::Instant::now();
+
+            if raw {
+                // 裸隧道：纯字节透传，不加解密
+                if ws_up.send(chunk).await.is_err() {
+                    break;
+                }
+                continue;
+            }
 
             clt_dec.xor(chunk);
             tg_enc.xor(chunk);
@@ -433,6 +444,14 @@ pub async fn bridge_ws(
             let n = data.len();
             STATS.bytes_down.fetch_add(n as i64, Ordering::Relaxed);
             *la_down.lock().await = std::time::Instant::now();
+
+            if raw {
+                // 裸隧道：原样回写客户端
+                if conn_write.write_all(&data).await.is_err() {
+                    break;
+                }
+                continue;
+            }
 
             tg_dec.xor(&mut data);
             clt_enc.xor(&mut data);
@@ -800,6 +819,7 @@ pub async fn do_fallback(
                 tg_enc,
                 tg_dec,
                 cancel_token,
+                false, // 池路径始终是 WS 模式
             )
             .await;
             return true;
@@ -1040,7 +1060,14 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
 
     // send direct init
     let mut ws = ws_opt.take().unwrap();
-    let mut send_ok = ws.send(&relay_init).await.is_ok();
+    // 裸隧道：原样透传客户端 hello（zws 是标准 MTProxy 服务，只认客户端 0xEF hello，
+    // 不认 tg-ws-proxy 的自建 relay_init——后者是 kws 端点私有握手）
+    let init_payload: Vec<u8> = if ws.is_raw_mode() {
+        handshake.to_vec()
+    } else {
+        relay_init.to_vec()
+    };
+    let mut send_ok = ws.send(&init_payload).await.is_ok();
     if send_ok {
         ldebug!(" direct relayInit sent DC{}{}", dc, m_tag);
     } else {
@@ -1077,7 +1104,12 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
                 return;
             }
             Some(rws) => {
-                if rws.send(&relay_init).await.is_err() {
+                let retry_payload: Vec<u8> = if rws.is_raw_mode() {
+                    handshake.to_vec()
+                } else {
+                    relay_init.to_vec()
+                };
+                if rws.send(&retry_payload).await.is_err() {
                     lwarn!(" direct relayInit write fail DC{}{}: closed", dc, m_tag);
                     rws.close().await;
                     lwarn!(" direct fallback DC{}{}", dc, m_tag);
@@ -1123,6 +1155,7 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
         tg_encryptor,
         tg_decryptor,
         cancel_token,
+        ws.is_raw_mode(), // 裸隧道 = 纯字节透传（不加解密）
     )
     .await;
 }

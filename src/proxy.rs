@@ -1141,6 +1141,7 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
     let _ = &pool;
     STATS.connections_ws.fetch_add(1, Ordering::Relaxed);
 
+    let is_raw = ws.is_raw_mode(); // 裸隧道 = 纯字节透传（不加解密）
     bridge_ws(
         conn,
         ws,
@@ -1155,7 +1156,7 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
         tg_encryptor,
         tg_decryptor,
         cancel_token,
-        ws.is_raw_mode(), // 裸隧道 = 纯字节透传（不加解密）
+        is_raw,
     )
     .await;
 }

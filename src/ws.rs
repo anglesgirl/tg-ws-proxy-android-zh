@@ -641,7 +641,7 @@ pub async fn tls_tunnel_once(
         return Err(WsError::Other("empty dial address".to_string()));
     }
     let tls_conn = tls_connect(dial_addr, domain, timeout).await?;
-    linfo!(" TLS 隧道 ok via {} SNI={} record=0304", dial_addr, domain);
+    linfo!(" TLS 隧道 ok via {} SNI={} record=0303", dial_addr, domain);
     let (read_half, write_half) = tokio::io::split(tls_conn);
     let bufreader = BufReader::with_capacity(4096, read_half);
     Ok(RawWebSocket {
@@ -663,7 +663,7 @@ pub async fn ws_connect_once(
         return Err(WsError::Other("empty dial address".to_string()));
     }
     let tls_conn = tls_connect(dial_addr, domain, timeout).await?;
-    linfo!(" WS TLS ok via {} SNI={} record=0304", dial_addr, domain);
+    linfo!(" WS TLS ok via {} SNI={} record=0303", dial_addr, domain);
 
     let (read_half, mut write_half) = tokio::io::split(tls_conn);
 

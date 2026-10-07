@@ -863,7 +863,8 @@ checksum = "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe"
 [[package]]
 name = "rustls"
 version = "0.23.45"
-source = "git+https://github.com/anglesgirl/rustls-0.23-0304?branch=main#9c2496ecf52360172e373eade4cf4f7f442da68a"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "once_cell",
  "ring",

@@ -40,6 +40,6 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
-# 0304 record version：绕过国内 DPI 对 0301/0303 的 SNI 阻断（Telegram DC 与 Cloudflare 均实测接受）
-[patch.crates-io]
-rustls = { git = "https://github.com/anglesgirl/rustls-0.23-0304", branch = "main" }
+# 0304 patch 已移除：实测 fork rustls 的 0304 record 在 CF 域名池网关的
+# 应用数据阶段触发 TLS fatal alert: ProtocolVersion（握手能过、WS 被拒）。
+# 走 CF 域名池时 SNI 是随机 .co.uk 域名，不在国内 DPI 名单，标准 0303 可直连。

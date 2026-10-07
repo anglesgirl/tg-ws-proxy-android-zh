@@ -1041,9 +1041,9 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
     let splitter = MsgSplitter::new(&relay_init, proto);
 
     let target_opt = resolve_configured_target(dc, is_media);
-    // 非媒体：走 do_fallback（Cloudflare 中转优先，TCP 直连兜底）
+    // 非媒体：无条件走 zws WS 主路径（界面填的 IP 优先，没填用默认 zws IP）
     // 媒体：保留原逻辑（界面优先，没配则走 do_fallback）
-    let dc_configured = target_opt.is_some() || is_media;
+    let dc_configured = target_opt.is_some() || !is_media;
     let target = if let Some(t) = target_opt {
         t
     } else if is_media {
@@ -1054,7 +1054,7 @@ pub async fn handle_client(pool: Arc<WsPool>, mut conn: TcpStream, cancel_token:
 
     let blacklisted = WS_BLACKLIST.read().get(&dc_key).copied().unwrap_or(false);
 
-    if !dc_configured || blacklisted || !is_media {
+    if !dc_configured || blacklisted {
         do_fallback(
             conn,
             &relay_init,

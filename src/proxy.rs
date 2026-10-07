@@ -540,7 +540,7 @@ fn tg_dc_ips(dc: i32) -> Vec<&'static str> {
 /// WSS 双向字节 relay（TCP ↔ WS binary frame，纯透传零解析）
 async fn relay_ws(mut conn: TcpStream, ws: std::sync::Arc<crate::ws::RawWebSocket>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let (cr, cw) = tokio::io::split(conn);
+    let (mut cr, cw) = tokio::io::split(conn);
     let ws_up = ws.clone();
     let up_task = tokio::spawn(async move {
         let mut buf = [0u8; 16384];

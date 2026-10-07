@@ -589,9 +589,29 @@ async fn relay_ws(mut conn: TcpStream, ws: std::sync::Arc<crate::ws::RawWebSocke
     ws.close().await;
 }
 
-/// WSS 隧道：路由级联（直连 DC IP → 系统 DNS 解析 kws 域名）→ 纯字节 relay
+/// WSS 隧道：Cloudflare 中转优先（尊重界面开关），直连 kws 兜底 → 纯字节 relay
 async fn handle_tg_wss(mut conn: TcpStream, dc: i32, cancel_token: CancellationToken) {
     use tokio::io::AsyncWriteExt;
+    // 路由 0：Cloudflare 中转——kws{dc}.{CF 域名池}，DoH 解析 CF 边缘 IP，SNI=域名
+    if CFPROXY_ENABLED.load(Ordering::Relaxed) {
+        if let Some((ws, chosen_domain)) = cfproxy_acquire_ws(dc, false, &cancel_token).await {
+            STATS.connections_cfproxy.fetch_add(1, Ordering::Relaxed);
+            linfo!(" WSS 经 Cloudflare 中转: kws{}.{} (dc={})", dc, chosen_domain, dc);
+            if conn
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await
+                .is_err()
+            {
+                let _ = cancel_token;
+                return;
+            }
+            relay_ws(conn, std::sync::Arc::new(ws)).await;
+            linfo!(" WSS 隧道关闭 (dc={}, Cloudflare)", dc);
+            let _ = cancel_token;
+            return;
+        }
+        linfo!(" CF 中转不可用 (dc={}), 回落直连 kws", dc);
+    }
     let host = format!("kws{}.web.telegram.org", dc);
     let mut ws: Option<std::sync::Arc<crate::ws::RawWebSocket>> = None;
     // 路由 1：直连 DC IP + SNI=kws{dc}

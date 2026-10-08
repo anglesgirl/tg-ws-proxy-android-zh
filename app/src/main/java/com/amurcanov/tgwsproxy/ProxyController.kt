@@ -17,6 +17,7 @@ object ProxyController {
         val portText = settingsStore.port.first()
         val port = portText.toIntOrNull()
         if (port == null) {
+            LogManager.add("[CTL] 端口无效: '$portText'", Log.ERROR, isError = true, isEssential = true)
             if (showInvalidPortToast) {
                 Toast.makeText(context, context.getString(R.string.invalid_port), Toast.LENGTH_SHORT).show()
             }
@@ -72,11 +73,13 @@ object ProxyController {
                 putExtra(ProxyService.EXTRA_SECRET_KEY, secretKey)
             }
         )
+        LogManager.add("[CTL] 已发送前台服务启动请求: port=$port bind=$bindIp dcAuto=$isDcAuto pool=$poolSize cf=$cfEnabled ips=${parsedIps.take(80)}")
         ProxyTileService.requestSync(context)
         return true
     }
 
     fun stop(context: Context) {
+        LogManager.add("[CTL] 发送停止请求")
         context.startService(
             Intent(context, ProxyService::class.java).apply {
                 action = ProxyService.ACTION_STOP

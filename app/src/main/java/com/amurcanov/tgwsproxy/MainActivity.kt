@@ -70,6 +70,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.BufferedReader
+import java.io.File
 import java.io.InputStreamReader
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.PI
@@ -194,6 +195,7 @@ fun MainContent(settingsStore: SettingsStore) {
     val navOverlayReserve = safeBottomInset + 96.dp
 
     DisposableEffect(Unit) {
+        LogManager.init(context.applicationContext)
         LogManager.startListening()
         onDispose { LogManager.stopListening() }
     }
@@ -595,9 +597,39 @@ object LogManager {
     private var job: Job? = null
     private var logcatProcess: Process? = null
     private val nextKey = AtomicLong(0)
+    private var appContext: Context? = null
+    private val fileLock = Any()
 
     // Buffered channel — absorbs bursts of log lines without blocking the reader
     private val logChannel = Channel<LogEntry>(capacity = BUFFERED)
+
+    private const val LOG_FILE_NAME = "tgwsproxy.log"
+    private const val LOG_FILE_MAX_BYTES = 512 * 1024
+    private const val LOG_FILE_KEEP_BYTES = 256 * 1024
+
+    /** 绑定进程上下文，用于持久化日志文件。在 UI 组合时调用一次即可。 */
+    fun init(context: Context) {
+        if (appContext == null) {
+            appContext = context.applicationContext
+        }
+    }
+
+    /**
+     * 直接写入一条日志（不依赖 logcat），同时持久化到文件。
+     * 全链路埋点统一走这里，保证日志面板一定能看到。
+     */
+    fun add(message: String, priority: Int = Log.INFO, isError: Boolean = false, isEssential: Boolean = false) {
+        val entry = LogEntry(
+            key = "log_${nextKey.getAndIncrement()}",
+            message = message,
+            count = 1,
+            isError = isError,
+            priority = priority,
+            isEssential = isEssential
+        )
+        logChannel.trySend(entry)
+        appendFile(entry)
+    }
 
     fun startListening() {
         if (job?.isActive == true) return
@@ -609,9 +641,9 @@ object LogManager {
                     val process = ProcessBuilder("logcat", "-v", "tag", "--pid", pid.toString())
                         .redirectErrorStream(true)
                         .start()
-                        
+
                     logcatProcess = process
-                    
+
                     process.inputStream.bufferedReader().use { reader ->
                         while (isActive) {
                             val line = try { reader.readLine() } catch (e: Exception) { null } ?: break
@@ -619,7 +651,8 @@ object LogManager {
                             logChannel.trySend(entry)
                         }
                     }
-                } catch (_: Exception) {
+                } catch (e: Exception) {
+                    add("日志通道(logcat)不可用: ${e.message}", Log.WARN, isEssential = true)
                 } finally {
                     logcatProcess?.destroy()
                     logcatProcess = null
@@ -639,7 +672,8 @@ object LogManager {
                     }
 
                     if (pendingBatch.isNotEmpty()) {
-                        // Apply batch to state — single list mutation
+                        // 持久化 + 一次性更新 UI 状态
+                        pendingBatch.forEach { appendFile(it) }
                         logs.value = applyBatch(logs.value, pendingBatch)
                         pendingBatch.clear()
                     }
@@ -689,66 +723,118 @@ object LogManager {
 
     fun clearLogs() {
         logs.value = emptyList()
+        appContext?.let { ctx ->
+            synchronized(fileLock) {
+                try {
+                    File(ctx.filesDir, LOG_FILE_NAME).delete()
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    /** 追加一行到持久化文件（带时间戳与级别），超过 512KB 时保留尾部 256KB。 */
+    private fun appendFile(entry: LogEntry) {
+        val ctx = appContext ?: return
+        synchronized(fileLock) {
+            try {
+                val file = File(ctx.filesDir, LOG_FILE_NAME)
+                if (file.length() > LOG_FILE_MAX_BYTES) {
+                    trimFile(file)
+                }
+                val ts = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US)
+                    .format(java.util.Date())
+                val level = when (entry.priority) {
+                    6 -> "E"
+                    5 -> "W"
+                    3 -> "D"
+                    else -> "I"
+                }
+                file.appendText("[$ts][$level] ${entry.message}\n")
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun trimFile(file: File) {
+        try {
+            val raf = java.io.RandomAccessFile(file, "rw")
+            val len = raf.length()
+            if (len > LOG_FILE_KEEP_BYTES) {
+                raf.seek(len - LOG_FILE_KEEP_BYTES)
+                val buf = ByteArray(LOG_FILE_KEEP_BYTES)
+                raf.readFully(buf)
+                raf.setLength(0)
+                raf.seek(0)
+                raf.write(buf)
+            }
+            raf.close()
+        } catch (_: Exception) {
+        }
     }
 
     private fun parseLine(raw: String): LogEntry? {
-        var message: String
-        val isError: Boolean
-        val priority: Int
+        // logcat -v tag 输出格式 "Tag: msg"；同时兼容 "L/Tag: msg" 形式
+        val tagLevel = Regex("^([VDIWEF])/([^:]+): (.*)$").find(raw)
+        val plain = if (tagLevel == null) Regex("^([^:]+): (.*)$").find(raw) else null
 
+        val level = tagLevel?.groupValues?.get(1) ?: "I"
+        val tag = tagLevel?.groupValues?.get(2) ?: plain?.groupValues?.get(1) ?: return null
+        var msg = tagLevel?.groupValues?.get(3) ?: plain?.groupValues?.get(2) ?: ""
+
+        var priority = when (level) {
+            "E" -> 6
+            "W" -> 5
+            "D", "V" -> 3
+            else -> 4
+        }
+        var isError = level == "E"
+
+        // 消息内容里的显式级别前缀优先
         when {
-            raw.contains("[ERROR]") -> {
-                message = raw.substringAfter("[ERROR]").trim()
+            msg.contains("[ERROR]") -> {
+                msg = msg.substringAfter("[ERROR]").trim()
+                priority = 6
                 isError = true
-                priority = 6 // Log.ERROR
             }
-            raw.contains("[WARN]") -> {
-                message = raw.substringAfter("[WARN]").trim()
-                isError = false // WARN is not ERROR, but distinctive
-                priority = 5 // Log.WARN
+            msg.contains("[WARN]") -> {
+                msg = msg.substringAfter("[WARN]").trim()
+                priority = 5
             }
-            raw.contains("[DEBUG]") -> {
-                message = raw.substringAfter("[DEBUG]").trim()
-                isError = false
-                priority = 3 // Log.DEBUG
+            msg.contains("[DEBUG]") -> {
+                msg = msg.substringAfter("[DEBUG]").trim()
+                priority = 3
             }
-            raw.contains("TgWsProxy") -> {
-                // Info doesn't have a prefix, so we strip basically everything up to the actual message
-                var msg = raw.substringAfter("TgWsProxy:").trim()
-                if (msg.startsWith("[ERROR]") || msg.startsWith("[WARN]") || msg.startsWith("[DEBUG]")) {
-                     return null // Handled above, but just in case
-                }
+            tag == "System.err" && priority == 4 -> priority = 5 // Java/JNA 异常输出
+        }
 
-                // 去除 ↑3.3KB ↓1.1KB 0.3秒 这类动态指标，让日志行可以折叠
-                if (msg.contains("↑")) {
-                    msg = msg.substringBefore("↑").trim()
-                }
-                if (msg.contains("↓")) {
-                    msg = msg.substringBefore("↓").trim()
-                }
-
-                message = msg
-                isError = false
-                priority = 4 // Log.INFO
-            }
-            else -> return null
+        // 去除 ↑3.3KB ↓1.1KB 0.3秒 这类动态指标，让日志行可以折叠
+        if (msg.contains("↑")) {
+            msg = msg.substringBefore("↑").trim()
+        }
+        if (msg.contains("↓")) {
+            msg = msg.substringBefore("↓").trim()
         }
 
         // Remove emojis and stickers
         val emojiRegex = Regex("[\\x{1F300}-\\x{1F5FF}\\x{1F900}-\\x{1F9FF}\\x{1F600}-\\x{1F64F}\\x{1F680}-\\x{1F6FF}\\x{2600}-\\x{26FF}\\x{2700}-\\x{27BF}\\x{1F1E6}-\\x{1F1FF}\\x{1F191}-\\x{1F251}\\x{1F004}\\x{1F0CF}\\x{1F170}-\\x{1F171}\\x{1F17E}-\\x{1F17F}\\x{1F18E}\\x{3030}\\x{2B50}\\x{2B55}\\x{2934}-\\x{2935}\\x{2B05}-\\x{2B07}\\x{2B1B}-\\x{2B1C}\\x{3297}\\x{3299}\\x{303D}\\x{00A9}\\x{00AE}\\x{2122}\\x{23F3}\\x{24C2}\\x{23E9}-\\x{23EF}\\x{25B6}\\x{23F8}-\\x{23FA}⚠✅❌⚡🔥🔄🔗]")
-        message = message.replace(emojiRegex, "").trim()
+        msg = msg.replace(emojiRegex, "").trim()
+
+        if (msg.isEmpty()) return null
 
         val isEssential = listOf(
             "pool", "key:", "started", "address:", "error", "failed", "blocked",
-            "池", "密钥:", "已启动", "地址:", "错误", "失败", "已封锁"
-        ).any { marker -> message.contains(marker, ignoreCase = true) }
+            "StartProxy", "StopProxy", "端口", "port", "超时", "异常", "启动", "停止", "bind", "listen", "返回",
+            "池", "密钥:", "已启动", "地址:", "错误", "失败", "已封锁", "不可用", "占用"
+        ).any { marker -> msg.contains(marker, ignoreCase = true) }
 
         return LogEntry(
             key = "log_${nextKey.getAndIncrement()}",
-            message = message,
+            message = msg,
             count = 1,
             isError = isError,
             priority = priority,
             isEssential = isEssential
         )
-    }}
+    }
+}

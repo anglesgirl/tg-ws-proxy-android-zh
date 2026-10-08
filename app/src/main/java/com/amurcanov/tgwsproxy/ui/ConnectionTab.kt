@@ -37,6 +37,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.amurcanov.tgwsproxy.BuildConfig
+import com.amurcanov.tgwsproxy.LogManager
 import com.amurcanov.tgwsproxy.ProxyController
 import com.amurcanov.tgwsproxy.ProxyService
 import com.amurcanov.tgwsproxy.SettingsStore
@@ -107,6 +108,7 @@ fun ConnectionTab(settingsStore: SettingsStore) {
 
     val connectAction = {
         if (!isRunning && !isStarting) {
+            LogManager.add("[UI] 点击连接按钮")
             isStarting = true
             scope.launch {
                 val started = ProxyController.startFromSavedSettings(
@@ -114,6 +116,7 @@ fun ConnectionTab(settingsStore: SettingsStore) {
                     showInvalidPortToast = true
                 )
                 if (!started) {
+                    LogManager.add("[UI] 启动未生效（端口无效或参数错误）", Log.WARN, isEssential = true)
                     isStarting = false
                 }
             }
@@ -122,6 +125,7 @@ fun ConnectionTab(settingsStore: SettingsStore) {
 
     val disconnectAction = {
         if (isRunning || isStarting) {
+            LogManager.add("[UI] 点击断开按钮")
             ProxyController.stop(context)
         }
     }

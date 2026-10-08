@@ -87,6 +87,7 @@ class ProxyService : Service() {
         when (intent?.action) {
             ACTION_START -> {
                 LogManager.clearLogs()
+                LogManager.add("[SRV] 收到启动请求")
                 val bindIp = intent.getStringExtra(EXTRA_BIND_IP) ?: "127.0.0.1"
                 val port = intent.getIntExtra(EXTRA_PORT, 1443)
                 val ips = intent.getStringExtra(EXTRA_IPS) ?: ""
@@ -99,9 +100,11 @@ class ProxyService : Service() {
                 startProxy(bindIp, port, ips, poolSize, cfEnabled, cfPriority, cfDomain, fixedIpRange, secretKey)
             }
             ACTION_STOP -> {
+                LogManager.add("[SRV] 收到停止请求")
                 stopProxy()
             }
             ACTION_RESTART -> {
+                LogManager.add("[SRV] 收到重启请求")
                 restartProxy()
             }
             null -> {
@@ -109,6 +112,7 @@ class ProxyService : Service() {
                 // If we had saved params, try to restart
                 if (lastPort > 0 && lastSecretKey.isNotEmpty()) {
                     Log.w(TAG, "Service restarted by system, re-starting proxy")
+                    LogManager.add("[SRV] 系统重启服务，使用上次参数自动恢复", Log.WARN, isEssential = true)
                     startProxy(lastBindIp, lastPort, lastIps, lastPoolSize, lastCfEnabled, lastCfPriority, lastCfDomain, lastFixedIpRange, lastSecretKey)
                 } else {
                     stopSelf()
@@ -137,8 +141,13 @@ class ProxyService : Service() {
     private fun startProxy(bindIp: String, port: Int, ips: String, poolSize: Int = 4,
                            cfEnabled: Boolean = true, cfPriority: Boolean = true,
                            cfDomain: String = "", fixedIpRange: String = "", secretKey: String = "") {
-        if (_isRunning.value || stopInProgress) return
+        if (_isRunning.value || stopInProgress) {
+            LogManager.add("[SRV] 已在运行或正在停止，忽略重复启动", Log.WARN, isEssential = true)
+            return
+        }
         _isVerifiedRunning.value = false
+
+        LogManager.add("[SRV] startProxy: bind=$bindIp port=$port pool=$poolSize cf=$cfEnabled domain=$cfDomain range=$fixedIpRange")
 
         // Save params for restart
         lastBindIp = bindIp
@@ -171,6 +180,12 @@ class ProxyService : Service() {
         // Start Go proxy in a separate thread with error handling
         Thread({
             val canObtainPort = isPortAvailable(bindIp, port)
+            LogManager.add(
+                if (canObtainPort) "[SRV] 端口预检 $bindIp:$port 可用" else "[SRV] 端口预检 $bindIp:$port 被占用",
+                if (canObtainPort) Log.INFO else Log.ERROR,
+                isError = !canObtainPort,
+                isEssential = true
+            )
             if (!canObtainPort) {
                 val str = getString(R.string.port_is_not_available, port)
                 serviceScope.launch(Dispatchers.Main) {
@@ -182,6 +197,7 @@ class ProxyService : Service() {
             }
 
             try {
+                LogManager.add("[SRV] 配置 Native 参数并调用 StartProxy…")
                 NativeProxy.setPoolSize(poolSize)
                 NativeProxy.setCfProxyCacheDir(cacheDir.absolutePath)
                 NativeProxy.setCfProxyConfig(cfEnabled, cfPriority, cfDomain)
@@ -194,10 +210,17 @@ class ProxyService : Service() {
                             _isVerifiedRunning.value = true
                             updateNotification(getString(R.string.notification_running), force = true)
                             Log.i(TAG, "Proxy ready: listening on port $port")
+                            LogManager.add("[SRV] StartProxy 成功，监听 $bindIp:$port")
                         }
                     }
                 } else {
                     Log.e(TAG, "StartProxy returned error code: $result")
+                    val reason = when (result) {
+                        -1 -> "已在运行"
+                        -3 -> "监听端口绑定失败"
+                        else -> "未知错误码"
+                    }
+                    LogManager.add("[SRV] StartProxy 返回 $result（$reason）", Log.ERROR, isError = true, isEssential = true)
                     serviceScope.launch {
                         updateNotification(getString(R.string.notification_start_error_code, result), force = true)
                         delay(3000)
@@ -206,6 +229,7 @@ class ProxyService : Service() {
                 }
             } catch (e: Throwable) {
                 Log.e(TAG, "Failed to start proxy via JNA", e)
+                LogManager.add("[SRV] 启动异常: ${e.message}", Log.ERROR, isError = true, isEssential = true)
                 serviceScope.launch {
                     updateNotification(getString(R.string.notification_error, e.message ?: ""), force = true)
                     delay(3000)
@@ -215,6 +239,14 @@ class ProxyService : Service() {
         }, "ProxyStart").apply {
             isDaemon = true
             start()
+        }
+
+        // 启动后 5 秒仍未确认运行状态 → 记录告警，用于排查"卡在启动中"
+        serviceScope.launch {
+            delay(5000)
+            if (!_isRunning.value && !stopInProgress) {
+                LogManager.add("[SRV] 启动 5 秒后仍未进入运行状态，可能阻塞或静默失败", Log.WARN, isEssential = true)
+            }
         }
 
                     // Don't stop — it might start slightly later; let the user decide
@@ -276,6 +308,7 @@ class ProxyService : Service() {
 
         restartJob = serviceScope.launch {
             Log.i(TAG, "Restarting proxy from notification")
+            LogManager.add("[SRV] 重启代理（来自通知）")
             updateNotification(getString(R.string.notification_restarting), force = true)
 
             statsJob?.cancel()
@@ -328,6 +361,7 @@ class ProxyService : Service() {
 
     private fun stopProxy() {
         if (stopInProgress) return
+        LogManager.add("[SRV] 停止服务")
         stopInProgress = true
         restartJob?.cancel()
         restartJob = null
@@ -370,6 +404,7 @@ class ProxyService : Service() {
 
         if (!finished) {
             Log.w(TAG, "Native stop is still running after ${NATIVE_STOP_WAIT_MS}ms during $reason")
+            LogManager.add("[SRV] 停止 Native 超时（$reason）", Log.WARN, isEssential = true)
         }
         return finished
     }
